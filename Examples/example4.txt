@@ -1,0 +1,27 @@
+begin
+  var a, b : int;
+  var result : int;
+
+  a := 10;
+  b := 5;
+
+  if a > b then
+    result := 1;
+
+  if a < b then
+    result := 2;
+
+  if a = b then
+    result := 3;
+
+  if a != b then
+    result := 4;
+
+  if a >= b then
+    result := 5;
+
+  if a <= b then
+    result := 6;
+
+  return result;
+end

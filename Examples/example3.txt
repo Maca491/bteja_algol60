@@ -1,0 +1,24 @@
+
+begin
+  var i, j : int;
+  var sum : int;
+  var mat : array[1..3, 1..3] of int;
+  
+  function calculate(x : int, y : int) : int;
+  begin
+    var temp : int;
+    temp := x * y;
+    return temp;
+  end
+
+  sum := 0;
+
+  for i := 1 step 1 until 3 do
+    for j := 1 step 1 until 3 do
+      mat[i, j] := calculate(i, j);  
+
+  for i := 1 step 1 until 3 do
+    sum := sum + mat[i, i];
+
+  return sum;
+end

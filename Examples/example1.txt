@@ -1,0 +1,11 @@
+begin
+  var a, b : int;
+  var x : real;
+  var message : string;
+
+  a := 10;
+  b := 3;
+  x := a / b;
+  message := "Vısledek";
+  return x;
+end

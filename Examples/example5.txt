@@ -1,0 +1,20 @@
+begin
+  var x, y, result : int;
+
+  procedure add(a : int, b : int) ;
+  begin
+    return a + b;
+  end
+
+  procedure show(v : int) ;
+  begin
+    result := v;
+  end
+
+  x := 2;
+  y := 3;
+  result := add(x, y);
+  show(result);
+
+  return result;
+end

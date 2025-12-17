@@ -1,0 +1,11 @@
+begin 
+var i, k, v : int;
+
+for i := 3 step 1 until 10 do
+
+ 
+k := v[i];
+v[i] := v[18 - i];
+v[18 - i] := k;
+
+end

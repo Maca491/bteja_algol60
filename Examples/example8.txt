@@ -1,0 +1,43 @@
+begin
+  var n : int;
+  var result : int;
+  var arr1 : array[1..5] of int;
+  var arr2 : array[1..5] of int;
+  var i : int;
+  
+  // Rekurzivni funkce - faktorial
+  function factorial(num : int) : int;
+  begin
+    var temp : int;
+    if num <= 1 then
+      temp := 1
+    else
+      temp := num * factorial(num - 1);  // Rekurzivni volani
+    return temp;
+  end
+  
+  // Rekurzivni funkce - Fibonacci
+  function fib(n : int) : int;
+  begin
+    var res : int;
+    if n <= 1 then
+      res := n
+    else
+      res := fib(n - 1) + fib(n - 2);  // Dvojite rekurzivni volani
+    return res;
+  end
+  
+  // Inicializace pole arr1
+  for i := 1 step 1 until 5 do
+    arr1[i] := i * 10;
+  
+  // NOVE: Prirazeni celeho pole
+  arr2 := arr1;
+  
+  // Test rekurze
+  n := 5;
+  result := factorial(n);
+  result := fib(6);
+  
+  return result;
+end

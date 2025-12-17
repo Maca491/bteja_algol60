@@ -1,0 +1,52 @@
+begin
+  var globalX : int;
+  var globalY : int;
+  
+  // Globální funkce
+  function globalFunc(a : int) : int;
+  begin
+    var localA : int;
+    localA := a + 1;
+    return localA;
+  end
+  
+  // Procedura s vnoøenou funkcí
+  procedure testScope(p : int);
+  begin
+    var procVar : int;
+    
+    // Vnoøená funkce v proceduøe
+    function nestedFunc(n : int) : int;
+    begin
+      var nestedVar : int;
+      // Správnì: pøístup k parametru vnoøené funkce
+      nestedVar := n * 2;
+      // Správnì: pøístup k parametru nadøazené procedury
+      nestedVar := nestedVar + p;
+      // Správnì: pøístup k globální promìnné
+      nestedVar := nestedVar + globalX;
+      return nestedVar;
+    end
+    
+    procVar := nestedFunc(5);
+    // Správnì: volání globální funkce
+    procVar := globalFunc(procVar);
+  end
+  
+  globalX := 10;
+  globalY := 20;
+  
+  // Správnì: volání globální procedury
+  testScope(15);
+  
+  // CHYBA: procVar není viditelná mimo proceduru
+  globalX := procVar;
+  
+  // CHYBA: nestedFunc není viditelná mimo proceduru
+  globalY := nestedFunc(3);
+  
+  // CHYBA: localA není viditelná mimo funkci
+  globalX := localA;
+  
+  return globalX;
+end
