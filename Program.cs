@@ -8,33 +8,37 @@ namespace Compilator
     {
         static void Main(string[] args)
         {
-            Console.WriteLine("Zadej název příkladu (např. example1.txt):");
-            string fileName = Console.ReadLine();
+            string command;
+            do {
+                Console.WriteLine("Zadej název příkladu (např. example1.txt):");
+                string fileName = Console.ReadLine();
 
-            string path = Path.Combine("Examples", fileName);
+                string path = Path.Combine("Examples", fileName);
 
-            if (!File.Exists(path))
-            {
-                Console.WriteLine("Soubor neexistuje.");
-                return;
-            }
+                if (!File.Exists(path))
+                {
+                    Console.WriteLine("Soubor neexistuje.");
+                    return;
+                }
 
-            string inputText = File.ReadAllText(path);
+                string inputText = File.ReadAllText(path);
 
-            // ANTLR pipeline
-            AntlrInputStream input = new AntlrInputStream(inputText);
-            AlgolSubsetLexer lexer = new AlgolSubsetLexer(input);
-            CommonTokenStream tokens = new CommonTokenStream(lexer);
-            AlgolSubsetParser parser = new AlgolSubsetParser(tokens);
+                // ANTLR pipeline
+                AntlrInputStream input = new AntlrInputStream(inputText);
+                AlgolSubsetLexer lexer = new AlgolSubsetLexer(input);
+                CommonTokenStream tokens = new CommonTokenStream(lexer);
+                AlgolSubsetParser parser = new AlgolSubsetParser(tokens);
 
-            // Start rule – podle gramatiky je to "program"
-            var tree = parser.program();
+                // Start rule – podle gramatiky je to "program"
+                var tree = parser.program();
 
-            Console.WriteLine("Parsování dokončeno bez chyb.");
-            Console.WriteLine(tree.ToStringTree(parser));
+                Console.WriteLine("Parsování dokončeno bez chyb.");
+                Console.WriteLine(tree.ToStringTree(parser));
 
-            var semanticAnalyzer = new SemanticAnalyzer();
-            semanticAnalyzer.Visit(tree);
+                var semanticAnalyzer = new SemanticAnalyzer();
+                semanticAnalyzer.Visit(tree);
+            } while((command = Console.ReadLine()) != "end");
+           
         }
     }
 }

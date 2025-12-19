@@ -10,6 +10,7 @@ public class SemanticAnalyzer : AlgolSubsetBaseVisitor<object>
         public SymbolKind Kind { get; set; }
         public string ReturnType { get; set; } // Pro funkce
         public bool IsArray { get; set; }
+        public bool IsFunctionType { get; set; } // NOVÉ: Je to funkèní typ?
     }
 
     public enum SymbolKind
@@ -139,13 +140,24 @@ public class SemanticAnalyzer : AlgolSubsetBaseVisitor<object>
         string name = context.IDENT().GetText();
         string type = context.type().GetText();
         bool isArray = context.type().array_type() != null;
+        bool isFunctionType = context.type().function_type() != null; // NOVÉ: Kontrola funkèního typu
+
+        // NOVÉ: Rozlišení funkèního parametru
+        var kind = isFunctionType ? SymbolKind.Function : SymbolKind.Variable;
 
         DeclareSymbol(name, new SymbolInfo
         {
             Type = type,
-            Kind = SymbolKind.Variable,
-            IsArray = isArray
+            Kind = kind,
+            IsArray = isArray,
+            IsFunctionType = isFunctionType
         });
+
+        if (isFunctionType)
+        {
+            Console.WriteLine($"Info: Parametr '{name}' je funkèního typu: {type}");
+        }
+
         return null;
     }
 

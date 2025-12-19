@@ -187,4 +187,16 @@ public interface IAlgolSubsetVisitor<Result> : IParseTreeVisitor<Result> {
 	/// <param name="context">The parse tree.</param>
 	/// <return>The visitor result.</return>
 	Result VisitFactor([NotNull] AlgolSubsetParser.FactorContext context);
+	/// <summary>
+	/// Visit a parse tree produced by <see cref="AlgolSubsetParser.function_type"/>.
+	/// </summary>
+	/// <param name="context">The parse tree.</param>
+	/// <return>The visitor result.</return>
+	Result VisitFunction_type([NotNull] AlgolSubsetParser.Function_typeContext context);
+	/// <summary>
+	/// Visit a parse tree produced by <see cref="AlgolSubsetParser.type_list"/>.
+	/// </summary>
+	/// <param name="context">The parse tree.</param>
+	/// <return>The visitor result.</return>
+	Result VisitType_list([NotNull] AlgolSubsetParser.Type_listContext context);
 }

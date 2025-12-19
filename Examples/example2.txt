@@ -1,11 +1,18 @@
-begin 
-var i, k, v : int;
+begin
+  var result : int;
+  
+  // Funkce jako parametr - UPRAVENO: pridana uplna signatura
+  function apply(f : function(int) : int, x : int) : int;
+  begin
+    return f(x);
+  end
 
-for i := 3 step 1 until 10 do
+  function square(n : int) : int;
+  begin
+    return n * n;
+  end
 
- 
-k := v[i];
-v[i] := v[18 - i];
-v[18 - i] := k;
-
+  result := apply(square, 5);
+  
+  return result;
 end

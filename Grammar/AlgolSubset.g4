@@ -24,6 +24,7 @@ ident_list
 type
     : simple_type
     | array_type
+    | function_type 
     ;
 
 simple_type
@@ -111,7 +112,7 @@ term
 factor
     : NUMBER
     | STRING
-    | IDENT                                              // OK - promìnná nebo pole jako celek
+    | IDENT                                              
     | procedure_call
     | IDENT '[' expression (',' expression)* ']' 
     | '(' expression ')'
@@ -133,12 +134,20 @@ WS
     : [ \t\r\n]+ -> skip
     ;
 
-// Jednoøádkové komentáøe
+function_type
+    : 'function' '(' type_list? ')' ':' type
+    ;
+
+type_list
+    : type (',' type)*
+    ;
+
+//Jednoøádkové komentáøe
 COMMENT
     : '//' ~[\r\n]* -> skip
     ;
 
-// Víceøádkové komentáøe
+//Víceøádkové komentáøe
 BLOCK_COMMENT
     : '/*' .*? '*/' -> skip
     ;
