@@ -1,11 +1,13 @@
 begin
-  var a, b : int;
+  var a, b : real;
   var x : real;
   var message : string;
 
-  a := 10;
-  b := 3;
+  a := 10.0;
+  b := 3.0;
   x := a / b;
-  message := "Vısledek";
+  message := "Vysledek";
+  print(message);
+  print(x);
   return x;
 end

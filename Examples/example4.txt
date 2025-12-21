@@ -23,5 +23,7 @@ begin
   if a <= b then
     result := 6;
 
+  print(result);
+
   return result;
 end

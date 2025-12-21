@@ -1,5 +1,7 @@
 ﻿using Antlr4.Runtime;
 using Antlr4.Runtime.Tree;
+using Compiler;
+using LLVMSharp.Interop;
 using static Antlr4.Runtime.Atn.SemanticContext;
 
 namespace Compilator
@@ -9,7 +11,7 @@ namespace Compilator
         static void Main(string[] args)
         {
             string command;
-            do {
+            do{
                 Console.WriteLine("Zadej název příkladu (např. example1.txt):");
                 string fileName = Console.ReadLine();
 
@@ -29,16 +31,39 @@ namespace Compilator
                 CommonTokenStream tokens = new CommonTokenStream(lexer);
                 AlgolSubsetParser parser = new AlgolSubsetParser(tokens);
 
-                // Start rule – podle gramatiky je to "program"
-                var tree = parser.program();
+                if (parser.NumberOfSyntaxErrors == 0)
+                {
+                    var tree = parser.program();
 
-                Console.WriteLine("Parsování dokončeno bez chyb.");
-                Console.WriteLine(tree.ToStringTree(parser));
+                    // 1. Sémantická kontrola
+                    var semanticAnalyzer = new SemanticAnalyzer();
+                    semanticAnalyzer.Visit(tree);
 
-                var semanticAnalyzer = new SemanticAnalyzer();
-                semanticAnalyzer.Visit(tree);
+                    // 2. Generování kódu
+                    Console.WriteLine("Generuji LLVM IR...");
+                    var generator = new LLVMGenerator();
+                    generator.Visit(tree);
+
+                    var module = generator.GetModule();
+
+                    // Výpis do konzole pro kontrolu
+                    module.Dump();
+
+                    // Kontrola validity
+                    if (!module.TryVerify(LLVMVerifierFailureAction.LLVMPrintMessageAction, out string error))
+                    {
+                        Console.WriteLine($"Chyba verifikace modulu: {error}");
+                    }
+                    else
+                    {
+                        // Uložení do souboru
+                        string outputFile = "output.ll";
+                        module.PrintToFile(outputFile);
+                        Console.WriteLine($"Soubor '{outputFile}' byl úspěšně vygenerován.");
+                        System.Diagnostics.Process.Start("clang", "output.ll -o program.exe");
+                    }
+                }
             } while((command = Console.ReadLine()) != "end");
-           
         }
     }
 }
