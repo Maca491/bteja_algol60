@@ -22,11 +22,31 @@ namespace Compiler
         private readonly Dictionary<string, (LLVMValueRef func, LLVMTypeRef returnType)> _functions = new Dictionary<string, (LLVMValueRef, LLVMTypeRef)>();
 
         // Stack pro vnořené scope (pro lokální proměnné ve funkcích)
-        private readonly Stack<Dictionary<string, (LLVMValueRef ptr, LLVMTypeRef type)>> _scopeStack = new Stack<Dictionary<string, (LLVMValueRef, LLVMTypeRef)>>();
+        // Každý scope udržuje záznamy o nově deklarovaných jménech a (pokud byly předtím přepsány) jejich předchozích hodnotách.
+        private readonly Stack<Dictionary<string, ScopeEntry>> _scopeStack = new Stack<Dictionary<string, ScopeEntry>>();
 
         private LLVMValueRef _printfFunc;
         private LLVMValueRef _currentFunction;
         private LLVMTypeRef _currentReturnType; // Aktuální návratový typ funkce
+
+        // Pomocná třída pro uložení informací o položce scope
+        private class ScopeEntry
+        {
+            public LLVMValueRef Ptr;
+            public LLVMTypeRef Type;
+            public bool HadPrev;
+            public LLVMValueRef PrevPtr;
+            public LLVMTypeRef PrevType;
+
+            public ScopeEntry(LLVMValueRef ptr, LLVMTypeRef type, bool hadPrev = false, LLVMValueRef prevPtr = default, LLVMTypeRef prevType = default)
+            {
+                Ptr = ptr;
+                Type = type;
+                HadPrev = hadPrev;
+                PrevPtr = prevPtr;
+                PrevType = prevType;
+            }
+        }
 
         public LLVMGenerator()
         {
@@ -52,7 +72,7 @@ namespace Compiler
 
         private void PushScope()
         {
-            _scopeStack.Push(new Dictionary<string, (LLVMValueRef, LLVMTypeRef)>());
+            _scopeStack.Push(new Dictionary<string, ScopeEntry>());
         }
 
         private void PopScope()
@@ -60,10 +80,20 @@ namespace Compiler
             if (_scopeStack.Count > 0)
             {
                 var scope = _scopeStack.Pop();
-                // Odstranění lokálních proměnných z hlavní tabulky
-                foreach (var key in scope.Keys)
+                // Při odstranění scope obnovíme původní hodnoty, pokud existovaly,
+                // jinak položku z úplné tabulky odstraníme.
+                foreach (var kv in scope)
                 {
-                    _namedValues.Remove(key);
+                    var key = kv.Key;
+                    var entry = kv.Value;
+                    if (entry.HadPrev)
+                    {
+                        _namedValues[key] = (entry.PrevPtr, entry.PrevType);
+                    }
+                    else
+                    {
+                        _namedValues.Remove(key);
+                    }
                 }
             }
         }
@@ -76,13 +106,13 @@ namespace Compiler
                 var ofIndex = typeName.IndexOf("of");
                 var elementTypeName = typeName.Substring(ofIndex + 2).Trim();
                 var elementType = GetLLVMType(elementTypeName);
-        
+
                 // Extrakce rozměrů: [1..3, 1..3]
                 var dimsStart = typeName.IndexOf('[') + 1;
                 var dimsEnd = typeName.IndexOf(']');
                 var dimsStr = typeName.Substring(dimsStart, dimsEnd - dimsStart);
                 var dimensions = dimsStr.Split(',');
-        
+
                 LLVMTypeRef arrayType = elementType;
                 foreach (var dim in dimensions.Reverse())
                 {
@@ -90,12 +120,40 @@ namespace Compiler
                     int start = int.Parse(range[0].Trim());
                     int end = int.Parse(range[1].Trim());
                     int size = end - start + 1;
-            
+
                     arrayType = LLVMTypeRef.CreateArray(arrayType, (uint)size);
                 }
                 return arrayType;
             }
-    
+
+            // Rozpoznání funkčního typu: "function(...):ret"
+            if (typeName.TrimStart().StartsWith("function"))
+            {
+                int pStart = typeName.IndexOf('(');
+                int pEnd = typeName.IndexOf(')');
+                var paramTypes = new List<LLVMTypeRef>();
+                if (pStart >= 0 && pEnd > pStart)
+                {
+                    var inner = typeName.Substring(pStart + 1, pEnd - pStart - 1).Trim();
+                    if (!string.IsNullOrEmpty(inner))
+                    {
+                        var parts = inner.Split(',', StringSplitOptions.RemoveEmptyEntries);
+                        foreach (var p in parts)
+                        {
+                            paramTypes.Add(GetLLVMType(p.Trim()));
+                        }
+                    }
+                }
+
+                int colon = typeName.IndexOf(':', pEnd >= 0 ? pEnd : 0);
+                string retName = colon >= 0 ? typeName.Substring(colon + 1).Trim() : "int";
+                var retType = GetLLVMType(retName);
+
+                var funcType = LLVMTypeRef.CreateFunction(retType, paramTypes.ToArray(), false);
+                // Zde použijeme statickou metodu CreatePointer
+                return LLVMTypeRef.CreatePointer(funcType, 0);
+            }
+
             if (typeName.Contains("real"))
                 return _doubleType;
             else if (typeName.Contains("string"))
@@ -181,9 +239,11 @@ public override LLVMValueRef VisitFunction_decl(AlgolSubsetParser.Function_declC
         var alloca = _builder.BuildAlloca(paramTypes[i], paramNames[i]);
         _builder.BuildStore(param, alloca);
         
+        // Uložíme do hlavní tabulky, ale zachováme případnou předchozí hodnotu v scope záznamu
+        bool hadPrev = _namedValues.TryGetValue(paramNames[i], out var prev);
         _namedValues[paramNames[i]] = (alloca, paramTypes[i]);
         if (_scopeStack.Count > 0)
-            _scopeStack.Peek()[paramNames[i]] = (alloca, paramTypes[i]);
+            _scopeStack.Peek()[paramNames[i]] = new ScopeEntry(alloca, paramTypes[i], hadPrev, prev.ptr, prev.type);
     }
 
     // Zpracování těla funkce
@@ -223,12 +283,15 @@ public override LLVMValueRef VisitFunction_decl(AlgolSubsetParser.Function_declC
             {
                 string name = ident.GetText();
                 var alloca = _builder.BuildAlloca(llvmType, name);
+
+                // Pokud už existuje proměnná se stejným jménem v okolním scope, uložíme její hodnotu
+                bool hadPrev = _namedValues.TryGetValue(name, out var prev);
                 _namedValues[name] = (alloca, llvmType);
                 
-                // Pokud jsme ve funkci, přidáme do current scope
+                // Pokud jsme ve funkci, přidáme do current scope záznam s informací o případné předchozí hodnotě
                 if (_scopeStack.Count > 0)
                 {
-                    _scopeStack.Peek()[name] = (alloca, llvmType);
+                    _scopeStack.Peek()[name] = new ScopeEntry(alloca, llvmType, hadPrev, prev.ptr, prev.type);
                 }
             }
             return default;
@@ -610,11 +673,17 @@ public override LLVMValueRef VisitTerm(AlgolSubsetParser.TermContext context)
             else if (context.IDENT() != null && context.procedure_call() == null)
             {
                 string name = context.IDENT().GetText();
+
+                // Pokud jde o jméno deklarované funkce, vraťme její LLVM hodnotu (funkce jako hodnota)
+                if (_functions.TryGetValue(name, out var funcInfo))
+                {
+                    return funcInfo.func;
+                }
+
                 if (_namedValues.TryGetValue(name, out var varInfo))
                 {
                     var (ptr, type) = varInfo;
-
-                    // Pokud máme indexy (např. mat[i, j] při čtení)
+                    // (indexování pole - stávající kód)
                     if (context.expression().Length > 0)
                     {
                         var indices = new List<LLVMValueRef> { LLVMValueRef.CreateConstInt(_i32Type, 0, false) };
@@ -629,12 +698,11 @@ public override LLVMValueRef VisitTerm(AlgolSubsetParser.TermContext context)
 
                         var elementPtr = _builder.BuildGEP2(type, ptr, indices.ToArray(), "arrayPtr");
 
-                        // Použijeme pomocnou funkci, která vrátí skutečný elementní typ (např. i32), nikoli vnitřní pole
                         var elementType = GetArrayElementType(type);
 
                         return _builder.BuildLoad2(elementType, elementPtr, "arrayElement");
                     }
-                    
+
                     // Skalární proměnná
                     return _builder.BuildLoad2(type, ptr, name);
                 }
@@ -664,98 +732,212 @@ public override LLVMValueRef VisitTerm(AlgolSubsetParser.TermContext context)
             if (name == "print" && context.expression().Length > 0)
             {
                 LLVMValueRef val = Visit(context.expression(0));
-                
-                if (val.Handle == IntPtr.Zero)
-                {
-                    Console.Error.WriteLine("Chyba: Nepodařilo se vyhodnotit argument pro print.");
-                    return default;
-                }
+                if (val.Handle == IntPtr.Zero) { Console.Error.WriteLine("Chyba: Nepodařilo se vyhodnotit argument pro print."); return default; }
 
                 var valType = val.TypeOf;
-                
                 string format;
-                if (valType.Kind == LLVMTypeKind.LLVMDoubleTypeKind)
-                {
-                    format = "%f\n";
-                }
-                else if (valType.Kind == LLVMTypeKind.LLVMPointerTypeKind)
-                {
-                    format = "%s\n";
-                }
-                else
-                {
-                    format = "%d\n";
-                }
+                if (valType.Kind == LLVMTypeKind.LLVMDoubleTypeKind) format = "%f\n";
+                else if (valType.Kind == LLVMTypeKind.LLVMPointerTypeKind) format = "%s\n";
+                else format = "%d\n";
 
                 var formatStr = _builder.BuildGlobalStringPtr(format, "fmt");
                 var args = new[] { formatStr, val };
-                
-                var printfFuncType = LLVMTypeRef.CreateFunction(_i32Type, 
-                    new[] { _i8PtrType }, 
-                    true);
-                    
+
+                var printfFuncType = LLVMTypeRef.CreateFunction(_i32Type, new[] { _i8PtrType }, true);
                 return _builder.BuildCall2(printfFuncType, _printfFunc, args, "printCall");
             }
 
-            // Volání uživatelské funkce
-            if (_functions.TryGetValue(name, out var funcInfo))
+            // 1) Pokusíme se najít proměnnou obsahující pointer na funkci (nejprve hlavní tabulka, pak scope stack)
+    bool foundVar = _namedValues.TryGetValue(name, out var varInfo);
+
+    if (!foundVar)
+    {
+        foreach (var scope in _scopeStack)
+        {
+            if (scope.TryGetValue(name, out var scopedEntry)) // scopedEntry je ScopeEntry
             {
-                var (func, returnType) = funcInfo;
-
-                // Zpracování argumentů
-                var args = new List<LLVMValueRef>();
-                var paramTypes = new List<LLVMTypeRef>();
-
-                foreach (var expr in context.expression())
-                {
-                    var arg = Visit(expr);
-                    if (arg.Handle == IntPtr.Zero)
-                    {
-                        Console.Error.WriteLine($"Chyba: Nepodařilo se vyhodnotit argument pro funkci '{name}'.");
-                        return default;
-                    }
-                    args.Add(arg);
-                    paramTypes.Add(arg.TypeOf);
-                }
-
-                // Rekonstrukce typu funkce
-                var funcType = LLVMTypeRef.CreateFunction(returnType, paramTypes.ToArray(), false);
-                return _builder.BuildCall2(funcType, func, args.ToArray(), "calltmp");
+                // Převést ScopeEntry na tuple očekávaný _namedValues a varInfo
+                varInfo = (scopedEntry.Ptr, scopedEntry.Type);
+                _namedValues[name] = varInfo; // uložíme tuple, ne ScopeEntry
+                foundVar = true;
+                break;
             }
+        }
+    }
 
-            Console.Error.WriteLine($"Chyba: Neznámá procedura '{name}'.");
+    if (foundVar)
+    {
+        var (ptr, varType) = varInfo;
+
+        // Pokud pointer invalidní, považujeme to za chybu
+        if (ptr.Handle == IntPtr.Zero)
+        {
+            Console.Error.WriteLine($"Chyba: Interní: proměnná '{name}' existuje, ale pointer je neplatný.");
             return default;
         }
 
-// Pomocné metody - vložte do třídy
-private LLVMTypeRef GetArrayElementType(LLVMTypeRef arrayType)
-{
-    var current = arrayType;
-    while (current.Kind == LLVMTypeKind.LLVMArrayTypeKind || current.Kind == LLVMTypeKind.LLVMPointerTypeKind && current.ElementType.Kind == LLVMTypeKind.LLVMArrayTypeKind)
-    {
-        // pokud je pointer na array (např. global string ptr), vezmeme element
-        current = current.ElementType;
+        // Načteme uloženou hodnotu (should be pointer-to-function nebo funkční hodnota)
+        var fnPtrVal = _builder.BuildLoad2(varType, ptr, name + "_val");
+        if (fnPtrVal.Handle == IntPtr.Zero)
+        {
+            Console.Error.WriteLine($"Chyba: Nepodařilo se načíst hodnotu funkční proměnné '{name}'.");
+            return default;
+        }
+
+        // Sestavíme argumenty (zatím bez bitcastu funkčních argumentů)
+        var argsList = new List<LLVMValueRef>();
+        foreach (var expr in context.expression())
+        {
+            var arg = Visit(expr);
+            if (arg.Handle == IntPtr.Zero)
+            {
+                Console.Error.WriteLine($"Chyba: Nepodařilo se vyhodnotit argument pro volání '{name}'.");
+                return default;
+            }
+            argsList.Add(arg);
+        }
+
+        // Robustní odvození LLVMFunctionType:
+        LLVMTypeRef funcType = default;
+
+        // 1) Zkusíme deklarovaný typ proměnné (varType) -- očekáváme pointer-to-function nebo pointer-to-pointer...
+        if (varType.Kind == LLVMTypeKind.LLVMPointerTypeKind)
+        {
+            var el = varType.ElementType;
+            if (el.Kind == LLVMTypeKind.LLVMFunctionTypeKind)
+                funcType = el;
+            else if (el.Kind == LLVMTypeKind.LLVMPointerTypeKind && el.ElementType.Kind == LLVMTypeKind.LLVMFunctionTypeKind)
+                funcType = el.ElementType;
+        }
+        else if (varType.Kind == LLVMTypeKind.LLVMFunctionTypeKind)
+        {
+            funcType = varType;
+        }
+
+        // 2) Pokud se nepodařilo z deklarace, zkusíme odvodit z načtené hodnoty (fnPtrVal)
+        if (funcType.Handle == IntPtr.Zero)
+        {
+            if (fnPtrVal.TypeOf.Kind == LLVMTypeKind.LLVMPointerTypeKind)
+            {
+                var el = fnPtrVal.TypeOf.ElementType;
+                if (el.Kind == LLVMTypeKind.LLVMFunctionTypeKind)
+                    funcType = el;
+                else if (el.Kind == LLVMTypeKind.LLVMPointerTypeKind && el.ElementType.Kind == LLVMTypeKind.LLVMFunctionTypeKind)
+                    funcType = el.ElementType;
+            }
+            else if (fnPtrVal.TypeOf.Kind == LLVMTypeKind.LLVMFunctionTypeKind)
+            {
+                funcType = fnPtrVal.TypeOf;
+            }
+        }
+
+        // 3) Poslední náhradní varianta: sestavíme jednoduchý LLVMFunctionType z typů argumentů a použijeme i32 návrat (bezpečnostní fallback)
+        if (funcType.Handle == IntPtr.Zero)
+        {
+            var paramTypes = new LLVMTypeRef[argsList.Count];
+            for (int i = 0; i < argsList.Count; i++)
+                paramTypes[i] = argsList[i].TypeOf;
+            funcType = LLVMTypeRef.CreateFunction(_i32Type, paramTypes, false);
+        }
+
+        // Připravíme callee jako pointer-to-function odpovídající funcType (bitcast pokud je třeba)
+        var expectedCalleeType = LLVMTypeRef.CreatePointer(funcType, 0);
+        LLVMValueRef callee = fnPtrVal;
+        if (!(fnPtrVal.TypeOf.Kind == LLVMTypeKind.LLVMPointerTypeKind && fnPtrVal.TypeOf.ElementType.Kind == LLVMTypeKind.LLVMFunctionTypeKind
+          && fnPtrVal.TypeOf.ElementType.Handle == funcType.Handle))
+        {
+            callee = _builder.BuildBitCast(fnPtrVal, expectedCalleeType, name + "_callee_cast");
+        }
+
+        // Přetypování argumentů, které jsou function-values -> pointer-to-function
+        for (int i = 0; i < argsList.Count; i++)
+        {
+            var a = argsList[i];
+            if (a.TypeOf.Kind == LLVMTypeKind.LLVMFunctionTypeKind)
+            {
+                var p = LLVMTypeRef.CreatePointer(a.TypeOf, 0);
+                argsList[i] = _builder.BuildBitCast(a, p, "arg_fn_to_ptr");
+            }
+        }
+
+        // Volání přes odvozený funkční typ a callee (pointer-to-function)
+        return _builder.BuildCall2(funcType, callee, argsList.ToArray(), "calltmp");
     }
-    // Pokud je stále pole, vrátíme element type
-    while (current.Kind == LLVMTypeKind.LLVMArrayTypeKind)
+
+    // 2) Volání pojmenované (globální) funkce
+    if (_functions.TryGetValue(name, out var funcInfo))
     {
-        current = current.ElementType;
+        var (func, returnType) = funcInfo;
+        var args = new List<LLVMValueRef>();
+        var paramTypes = new List<LLVMTypeRef>();
+
+        foreach (var expr in context.expression())
+        {
+            var arg = Visit(expr);
+            if (arg.Handle == IntPtr.Zero) { Console.Error.WriteLine($"Chyba: Nepodařilo se vyhodnotit argument pro funkci '{name}'."); return default; }
+
+            if (arg.TypeOf.Kind == LLVMTypeKind.LLVMFunctionTypeKind)
+            {
+                var ptrType = LLVMTypeRef.CreatePointer(arg.TypeOf, 0);
+                arg = _builder.BuildBitCast(arg, ptrType, "fn_to_ptr");
+            }
+
+            args.Add(arg);
+            paramTypes.Add(arg.TypeOf);
+        }
+
+        var fType = LLVMTypeRef.CreateFunction(returnType, paramTypes.ToArray(), false);
+        return _builder.BuildCall2(fType, func, args.ToArray(), "calltmp");
     }
-    return current;
+
+    Console.Error.WriteLine($"Chyba: Neznámá procedura '{name}'.");
+    return default;
 }
 
-private bool TypesEqual(LLVMTypeRef a, LLVMTypeRef b)
-{
-    if (a.Handle == IntPtr.Zero || b.Handle == IntPtr.Zero) return false;
-    // Porovnání podle Kind; u pointerů (string) stačí Kind==Pointer
-    if (a.Kind != b.Kind) return false;
-    // U pole/double/int lze porovnat Kind, u pointerů lze porovnat element typ
-    if (a.Kind == LLVMTypeKind.LLVMPointerTypeKind)
+        // Pomocné metody - vložte do třídy
+        private LLVMTypeRef GetArrayElementType(LLVMTypeRef arrayType)
+        {
+            var current = arrayType;
+            // Ošetřit pointer na pole i přímo pole – opravena konstanta a precedence podmínek
+            while (current.Kind == LLVMTypeKind.LLVMArrayTypeKind
+                   || (current.Kind == LLVMTypeKind.LLVMPointerTypeKind && current.ElementType.Kind == LLVMTypeKind.LLVMArrayTypeKind))
+            {
+                // pokud je pointer na array (např. global string ptr), vezmeme element
+                current = current.ElementType;
+            }
+
+            // Pokud je stále pole, vrátíme element type (např. vícerozměrné pole)
+            while (current.Kind == LLVMTypeKind.LLVMArrayTypeKind)
+            {
+                current = current.ElementType;
+            }
+
+            return current;
+        }
+
+    private bool TypesEqual(LLVMTypeRef a, LLVMTypeRef b)
     {
-        // pro jednoduchost považujeme všechny pointery za kompatibilní pouze v případě, že mají stejný element typ
-        return a.ElementType.Kind == b.ElementType.Kind;
+        if (a.Handle == IntPtr.Zero || b.Handle == IntPtr.Zero) return false;
+
+        // Rychlá kontrola podle Kind
+        if (a.Kind != b.Kind) return false;
+
+        // Speciální porovnání pro funkční typy — porovnáme textovou reprezentaci typu
+        if (a.Kind == LLVMTypeKind.LLVMFunctionTypeKind)
+        {
+            // LLVMTypeRef nemá FunctionType vlastnost v této binding verzi,
+            // proto porovnáme canonical string reprezentaci typu.
+            return a.ToString() == b.ToString();
+        }
+
+        if (a.Kind == LLVMTypeKind.LLVMPointerTypeKind)
+        {
+            // porovnáme element typ pointeru
+            return a.ElementType.Kind == b.ElementType.Kind;
+        }
+
+        // Pro ostatní typy stačí shoda Kind
+        return true;
     }
-    return true;
-}
+        }
     }
-}

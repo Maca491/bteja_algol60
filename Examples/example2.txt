@@ -14,5 +14,6 @@ begin
 
   result := apply(square, 5);
   
+  print(result);
   return result;
 end

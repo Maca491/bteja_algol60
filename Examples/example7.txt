@@ -6,6 +6,9 @@ begin
   // Globální x = 100
   x := 100;
   y := 200;
+  print("Globalni");
+  print(x);
+  print(y);
   
   // Funkce se zastínìním globální promìnné x
   function shadowTest(x : int, z : int) : int;
@@ -14,7 +17,6 @@ begin
     var temp : int;
     
     // Lokální x (parametr) zastíní globální x
-    // Toto x je parametr funkce, ne globální promìnná
     temp := x + 10;
     
     // Lokální y zastíní globální y
@@ -27,6 +29,7 @@ begin
       // Toto x je parametr innerShadow, zastíní parametr shadowTest
       // Toto y je lokální v innerShadow, zastíní y ze shadowTest
       y := 5;
+      print(x+y);
       return x + y;
     end
     
@@ -37,15 +40,18 @@ begin
     // y je stále lokální y ze shadowTest (hodnota 50)
     temp := temp + y + z;
     
+    print(temp);
     return temp;
   end
   
   // Volání funkce s parametrem 15
   // Uvnitø funkce bude x=15 (parametr), ne x=100 (globální)
   result := shadowTest(15, 3);
+  print(result);
   
   // Po návratu z funkce, x je opìt globální x=100
   result := result + x + y;
   
+  print(result);
   return result;
 end
