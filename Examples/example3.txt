@@ -1,4 +1,3 @@
-
 begin
   var i, j : int;
   var sum : int;
@@ -8,6 +7,7 @@ begin
   begin
     var temp : int;
     temp := x * y;
+    print(temp);
     return temp;
   end
 
@@ -20,5 +20,6 @@ begin
   for i := 1 step 1 until 3 do
     sum := sum + mat[i, i];
 
+  print(sum);  
   return sum;
 end

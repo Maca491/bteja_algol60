@@ -18,7 +18,7 @@ begin
     result := 4;
 
   if a >= b then
-    result := 5;
+    result := 99;
 
   if a <= b then
     result := 6;

@@ -26,6 +26,7 @@ namespace Compiler
 
         private LLVMValueRef _printfFunc;
         private LLVMValueRef _currentFunction;
+        private LLVMTypeRef _currentReturnType; // Aktuální návratový typ funkce
 
         public LLVMGenerator()
         {
@@ -69,6 +70,32 @@ namespace Compiler
 
         private LLVMTypeRef GetLLVMType(string typeName)
         {
+            if (typeName.StartsWith("array"))
+            {
+                // Parsování: "array[1..3,1..3]ofint"
+                var ofIndex = typeName.IndexOf("of");
+                var elementTypeName = typeName.Substring(ofIndex + 2).Trim();
+                var elementType = GetLLVMType(elementTypeName);
+        
+                // Extrakce rozměrů: [1..3, 1..3]
+                var dimsStart = typeName.IndexOf('[') + 1;
+                var dimsEnd = typeName.IndexOf(']');
+                var dimsStr = typeName.Substring(dimsStart, dimsEnd - dimsStart);
+                var dimensions = dimsStr.Split(',');
+        
+                LLVMTypeRef arrayType = elementType;
+                foreach (var dim in dimensions.Reverse())
+                {
+                    var range = dim.Split(new[] { ".." }, StringSplitOptions.None);
+                    int start = int.Parse(range[0].Trim());
+                    int end = int.Parse(range[1].Trim());
+                    int size = end - start + 1;
+            
+                    arrayType = LLVMTypeRef.CreateArray(arrayType, (uint)size);
+                }
+                return arrayType;
+            }
+    
             if (typeName.Contains("real"))
                 return _doubleType;
             else if (typeName.Contains("string"))
@@ -84,11 +111,14 @@ namespace Compiler
             var entryBlock = _context.AppendBasicBlock(mainFunc, "entry");
 
             _currentFunction = mainFunc;
+            _currentReturnType = _i32Type; // nastavit očekávaný návratový typ pro top-level (main)
             _builder.PositionAtEnd(entryBlock);
 
             base.VisitProgram(context);
 
-            if (entryBlock.Terminator.Handle == IntPtr.Zero)
+            // Pokud je aktuální blok bez terminátoru, přidáme návrat (kontrolujeme vložený blok, ne jen entry)
+            var insertBlock = _builder.InsertBlock;
+            if (insertBlock.Handle != IntPtr.Zero && insertBlock.Terminator.Handle == IntPtr.Zero)
             {
                 _builder.BuildRet(LLVMValueRef.CreateConstInt(_i32Type, 0, false));
             }
@@ -96,89 +126,93 @@ namespace Compiler
             return mainFunc;
         }
 
-        public override LLVMValueRef VisitFunction_decl(AlgolSubsetParser.Function_declContext context)
+        // Upravit VisitFunction_decl: uložit/obnovit _currentReturnType
+public override LLVMValueRef VisitFunction_decl(AlgolSubsetParser.Function_declContext context)
+{
+    string funcName = context.IDENT().GetText();
+    string returnTypeName = context.type().GetText();
+    LLVMTypeRef returnType = GetLLVMType(returnTypeName);
+
+    // Zpracování parametrů
+    var paramTypes = new List<LLVMTypeRef>();
+    var paramNames = new List<string>();
+
+    if (context.param_list() != null)
+    {
+        foreach (var param in context.param_list().param())
         {
-            string funcName = context.IDENT().GetText();
-            string returnTypeName = context.type().GetText();
-            LLVMTypeRef returnType = GetLLVMType(returnTypeName);
-
-            // Zpracování parametrů
-            var paramTypes = new List<LLVMTypeRef>();
-            var paramNames = new List<string>();
-
-            if (context.param_list() != null)
-            {
-                foreach (var param in context.param_list().param())
-                {
-                    string paramName = param.IDENT().GetText();
-                    string paramTypeName = param.type().GetText();
-                    LLVMTypeRef paramType = GetLLVMType(paramTypeName);
-                    
-                    paramTypes.Add(paramType);
-                    paramNames.Add(paramName);
-                }
-            }
-
-            // Vytvoření funkce
-            var funcType = LLVMTypeRef.CreateFunction(returnType, paramTypes.ToArray(), false);
-            var function = _module.AddFunction(funcName, funcType);
-
-            // Uložení do tabulky funkcí
-            _functions[funcName] = (function, returnType);
-
-            // Uložení současného stavu
-            var previousFunction = _currentFunction;
-            var previousBlock = _builder.InsertBlock;
-
-            _currentFunction = function;
-
-            // Vytvoření entry bloku
-            var entryBlock = _context.AppendBasicBlock(function, "entry");
-            _builder.PositionAtEnd(entryBlock);
-
-            // Nový scope pro parametry a lokální proměnné
-            PushScope();
-
-            // Alokace a uložení parametrů
-            for (int i = 0; i < paramNames.Count; i++)
-            {
-                var param = function.GetParam((uint)i);
-                param.Name = paramNames[i];
-                
-                var alloca = _builder.BuildAlloca(paramTypes[i], paramNames[i]);
-                _builder.BuildStore(param, alloca);
-                
-                _namedValues[paramNames[i]] = (alloca, paramTypes[i]);
-                if (_scopeStack.Count > 0)
-                    _scopeStack.Peek()[paramNames[i]] = (alloca, paramTypes[i]);
-            }
-
-            // Zpracování těla funkce
-            Visit(context.block());
-
-            // Kontrola terminátoru
-            if (entryBlock.Terminator.Handle == IntPtr.Zero)
-            {
-                if (returnType.Kind == LLVMTypeKind.LLVMVoidTypeKind)
-                {
-                    _builder.BuildRetVoid();
-                }
-                else
-                {
-                    _builder.BuildRet(LLVMValueRef.CreateConstInt(returnType, 0, false));
-                }
-            }
-
-            // Návrat k předchozímu stavu
-            PopScope();
-            _currentFunction = previousFunction;
-            if (previousBlock.Handle != IntPtr.Zero)
-            {
-                _builder.PositionAtEnd(previousBlock);
-            }
-
-            return function;
+            string paramName = param.IDENT().GetText();
+            string paramTypeName = param.type().GetText();
+            LLVMTypeRef paramType = GetLLVMType(paramTypeName);
+            
+            paramTypes.Add(paramType);
+            paramNames.Add(paramName);
         }
+    }
+
+    // Vytvoření funkce
+    var funcType = LLVMTypeRef.CreateFunction(returnType, paramTypes.ToArray(), false);
+    var function = _module.AddFunction(funcName, funcType);
+
+    // Uložení do tabulky funkcí
+    _functions[funcName] = (function, returnType);
+
+    // Uložení současného stavu
+    var previousFunction = _currentFunction;
+    var previousBlock = _builder.InsertBlock;
+    var previousReturnType = _currentReturnType;
+
+    _currentFunction = function;
+    _currentReturnType = returnType;
+
+    // Vytvoření entry bloku
+    var entryBlock = _context.AppendBasicBlock(function, "entry");
+    _builder.PositionAtEnd(entryBlock);
+
+    // Nový scope pro parametry a lokální proměnné
+    PushScope();
+
+    // Alokace a uložení parametrů
+    for (int i = 0; i < paramNames.Count; i++)
+    {
+        var param = function.GetParam((uint)i);
+        param.Name = paramNames[i];
+        
+        var alloca = _builder.BuildAlloca(paramTypes[i], paramNames[i]);
+        _builder.BuildStore(param, alloca);
+        
+        _namedValues[paramNames[i]] = (alloca, paramTypes[i]);
+        if (_scopeStack.Count > 0)
+            _scopeStack.Peek()[paramNames[i]] = (alloca, paramTypes[i]);
+    }
+
+    // Zpracování těla funkce
+    Visit(context.block());
+
+    // Kontrola terminátoru
+    if (entryBlock.Terminator.Handle == IntPtr.Zero)
+    {
+        if (_currentReturnType.Kind == LLVMTypeKind.LLVMVoidTypeKind)
+        {
+            _builder.BuildRetVoid();
+        }
+        else
+        {
+            _builder.BuildRet(LLVMValueRef.CreateConstInt(_currentReturnType, 0, false));
+        }
+    }
+
+    // Návrat k předchozímu stavu
+    PopScope();
+    _currentFunction = previousFunction;
+    _currentReturnType = previousReturnType;
+    if (previousBlock.Handle != IntPtr.Zero)
+    {
+        _builder.PositionAtEnd(previousBlock);
+    }
+
+    return function;
+}
 
         public override LLVMValueRef VisitVariable_decl(AlgolSubsetParser.Variable_declContext context)
         {
@@ -200,17 +234,55 @@ namespace Compiler
             return default;
         }
 
-        public override LLVMValueRef VisitAssignment(AlgolSubsetParser.AssignmentContext context)
+        // Upravit VisitAssignment - zakázat automatickou konverzi, hlásit chybu při mismatch
+public override LLVMValueRef VisitAssignment(AlgolSubsetParser.AssignmentContext context)
+{
+    string name = context.IDENT().GetText();
+
+    if (!_namedValues.ContainsKey(name))
+    {
+        Console.Error.WriteLine($"Chyba: Proměnná '{name}' neexistuje.");
+        return default;
+    }
+
+    var (ptr, targetType) = _namedValues[name];
+
+    // Zpracování indexů pole (mat[i, j])
+    if (context.expression().Length > 1)
+    {
+        var indices = new List<LLVMValueRef> { LLVMValueRef.CreateConstInt(_i32Type, 0, false) };
+
+        for (int i = 0; i < context.expression().Length - 1; i++)
         {
-            string name = context.IDENT().GetText();
+            var index = Visit(context.expression(i));
+            if (index.Handle == IntPtr.Zero) { Console.Error.WriteLine("Chyba: Nepodařilo se vyhodnotit index pole."); return default; }
+            var adjustedIndex = _builder.BuildSub(index,
+                LLVMValueRef.CreateConstInt(_i32Type, 1, false), "adjustedIdx");
+            indices.Add(adjustedIndex);
+        }
 
-            if (!_namedValues.ContainsKey(name))
-            {
-                Console.Error.WriteLine($"Chyba: Proměnná '{name}' neexistuje.");
-                return default;
-            }
+        var elementPtr = _builder.BuildGEP2(targetType, ptr, indices.ToArray(), "arrayPtr");
 
-            int exprIndex = context.expression().Length - 1;
+        int valueExprIndex = context.expression().Length - 1;
+        var assignedValue = Visit(context.expression(valueExprIndex));
+        if (assignedValue.Handle == IntPtr.Zero) { Console.Error.WriteLine("Chyba: Nepodařilo se vyhodnotit výraz pro přiřazení do pole."); return default; }
+
+        // Získání typu prvku pole
+        var elementType = GetArrayElementType(targetType);
+
+        // Přísné porovnání typů - žádná automatická konverze
+        if (!TypesEqual(assignedValue.TypeOf, elementType))
+        {
+            Console.Error.WriteLine($"Chyba typů: nelze přiřadit hodnotu typu '{assignedValue.TypeOf.Kind}' do prvku pole typu '{elementType.Kind}'.");
+            return default;
+        }
+
+        _builder.BuildStore(assignedValue, elementPtr);
+        return assignedValue;
+    }
+    
+    // Skalární proměnné
+    int exprIndex = context.expression().Length - 1;
             LLVMValueRef value = Visit(context.expression(exprIndex));
             
             if (value.Handle == IntPtr.Zero)
@@ -219,30 +291,16 @@ namespace Compiler
                 return default;
             }
 
-            var (ptr, targetType) = _namedValues[name];
-            
-            if (ptr.Handle == IntPtr.Zero)
+            var valueType = value.TypeOf;
+
+            // Přísné porovnání typů - žádná automatická konverze
+            if (!TypesEqual(valueType, targetType))
             {
-                Console.Error.WriteLine($"Chyba: Neplatný pointer pro proměnnou '{name}'.");
+                Console.Error.WriteLine($"Chyba typů: nelze přiřadit hodnotu typu '{valueType.Kind}' do proměnné '{name}' typu '{targetType.Kind}'.");
                 return default;
             }
 
-            var valueType = value.TypeOf;
-            
-            if (valueType.Kind != targetType.Kind)
-            {
-                if (targetType.Kind == LLVMTypeKind.LLVMDoubleTypeKind && valueType.Kind == LLVMTypeKind.LLVMIntegerTypeKind)
-                {
-                    value = _builder.BuildSIToFP(value, _doubleType, "intToDouble");
-                }
-                else if (targetType.Kind == LLVMTypeKind.LLVMIntegerTypeKind && valueType.Kind == LLVMTypeKind.LLVMDoubleTypeKind)
-                {
-                    value = _builder.BuildFPToSI(value, _i32Type, "doubleToInt");
-                }
-            }
-
             _builder.BuildStore(value, ptr);
-
             return value;
         }
 
@@ -358,77 +416,85 @@ namespace Compiler
             return default;
         }
 
-        public override LLVMValueRef VisitReturn_statement(AlgolSubsetParser.Return_statementContext context)
+        // Upravit VisitReturn_statement - bez automatické konverze, porovnat s _currentReturnType
+public override LLVMValueRef VisitReturn_statement(AlgolSubsetParser.Return_statementContext context)
+{
+    var returnValue = Visit(context.expression());
+
+    if (returnValue.Handle == IntPtr.Zero)
+    {
+        Console.Error.WriteLine("Chyba: Nepodařilo se vyhodnotit návratovou hodnotu.");
+        return default;
+    }
+
+    if (_currentReturnType.Handle == IntPtr.Zero)
+    {
+        Console.Error.WriteLine("Chyba: Interní: není znám očekávaný návratový typ funkce.");
+        return default;
+    }
+
+    if (!TypesEqual(returnValue.TypeOf, _currentReturnType))
+    {
+        Console.Error.WriteLine($"Chyba typů při return: hodnota typu '{returnValue.TypeOf.Kind}' neodpovídá očekávanému '{_currentReturnType.Kind}'.");
+        return default;
+    }
+
+    _builder.BuildRet(returnValue);
+    return returnValue;
+}
+
+        // Upravit VisitSimple_expr - zakázat implicitní int->double/vice konverze
+public override LLVMValueRef VisitSimple_expr(AlgolSubsetParser.Simple_exprContext context)
+{
+    LLVMValueRef left = Visit(context.term(0));
+
+    if (left.Handle == IntPtr.Zero)
+    {
+        Console.Error.WriteLine("Chyba: Nepodařilo se vyhodnotit levý operand výrazu.");
+        return default;
+    }
+
+    for (int i = 1; i < context.term().Length; i++)
+    {
+        LLVMValueRef right = Visit(context.term(i));
+
+        if (right.Handle == IntPtr.Zero)
         {
-            var returnValue = Visit(context.expression());
-            
-            if (returnValue.Handle == IntPtr.Zero)
-            {
-                Console.Error.WriteLine("Chyba: Nepodařilo se vyhodnotit návratovou hodnotu.");
-                return default;
-            }
-
-            var returnType = returnValue.TypeOf;
-            
-            if (returnType.Kind == LLVMTypeKind.LLVMDoubleTypeKind)
-            {
-                returnValue = _builder.BuildFPToSI(returnValue, _i32Type, "retCast");
-            }
-            else if (returnType.Kind == LLVMTypeKind.LLVMPointerTypeKind)
-            {
-                returnValue = LLVMValueRef.CreateConstInt(_i32Type, 0, false);
-            }
-
-            _builder.BuildRet(returnValue);
-            return returnValue;
+            Console.Error.WriteLine("Chyba: Nepodařilo se vyhodnotit pravý operand výrazu.");
+            return default;
         }
 
-        public override LLVMValueRef VisitSimple_expr(AlgolSubsetParser.Simple_exprContext context)
+        string op = context.GetChild(2 * i - 1).GetText();
+
+        // Přísné porovnání typů - bez automatické konverze
+        if (!TypesEqual(left.TypeOf, right.TypeOf))
         {
-            LLVMValueRef left = Visit(context.term(0));
-            
-            if (left.Handle == IntPtr.Zero)
-            {
-                Console.Error.WriteLine("Chyba: Nepodařilo se vyhodnotit levý operand výrazu.");
-                return default;
-            }
-
-            for (int i = 1; i < context.term().Length; i++)
-            {
-                LLVMValueRef right = Visit(context.term(i));
-                
-                if (right.Handle == IntPtr.Zero)
-                {
-                    Console.Error.WriteLine("Chyba: Nepodařilo se vyhodnotit pravý operand výrazu.");
-                    return default;
-                }
-                
-                string op = context.GetChild(2 * i - 1).GetText();
-
-                var leftType = left.TypeOf;
-                var rightType = right.TypeOf;
-                
-                bool isDouble = leftType.Kind == LLVMTypeKind.LLVMDoubleTypeKind || 
-                                rightType.Kind == LLVMTypeKind.LLVMDoubleTypeKind;
-
-                if (isDouble)
-                {
-                    if (leftType.Kind != LLVMTypeKind.LLVMDoubleTypeKind)
-                        left = _builder.BuildSIToFP(left, _doubleType, "toDouble");
-                    if (rightType.Kind != LLVMTypeKind.LLVMDoubleTypeKind)
-                        right = _builder.BuildSIToFP(right, _doubleType, "toDouble");
-
-                    if (op == "+") left = _builder.BuildFAdd(left, right, "addtmp");
-                    else if (op == "-") left = _builder.BuildFSub(left, right, "subtmp");
-                }
-                else
-                {
-                    if (op == "+") left = _builder.BuildAdd(left, right, "addtmp");
-                    else if (op == "-") left = _builder.BuildSub(left, right, "subtmp");
-                }
-            }
-            return left;
+            Console.Error.WriteLine($"Chyba typů v aritmetickém výrazu: levý operand '{left.TypeOf.Kind}', pravý operand '{right.TypeOf.Kind}'.");
+            return default;
         }
+
+        var kind = left.TypeOf.Kind;
+
+        if (kind == LLVMTypeKind.LLVMDoubleTypeKind)
+        {
+            if (op == "+") left = _builder.BuildFAdd(left, right, "addtmp");
+            else if (op == "-") left = _builder.BuildFSub(left, right, "subtmp");
+            else { Console.Error.WriteLine($"Chyba: Nepodporovaný operátor '{op}' pro typ double."); return default; }
+        }
+        else if (kind == LLVMTypeKind.LLVMIntegerTypeKind)
+        {
+            if (op == "+") left = _builder.BuildAdd(left, right, "addtmp");
+            else if (op == "-") left = _builder.BuildSub(left, right, "subtmp");
+            else { Console.Error.WriteLine($"Chyba: Nepodporovaný operátor '{op}' pro typ int."); return default; }
+        }
+        else
+        {
+            Console.Error.WriteLine($"Chyba: Aritmetika není podporována pro typ '{kind}'.");
+            return default;
+        }
+    }
+    return left;
+}
 
         public override LLVMValueRef VisitExpression(AlgolSubsetParser.ExpressionContext context)
         {
@@ -458,52 +524,57 @@ namespace Compiler
             return left;
         }
 
-        public override LLVMValueRef VisitTerm(AlgolSubsetParser.TermContext context)
+        // Upravit VisitTerm analogicky k VisitSimple_expr (bez implicitních konverzí)
+public override LLVMValueRef VisitTerm(AlgolSubsetParser.TermContext context)
+{
+    LLVMValueRef left = Visit(context.factor(0));
+
+    if (left.Handle == IntPtr.Zero)
+    {
+        Console.Error.WriteLine("Chyba: Nepodařilo se vyhodnotit levý operand termu.");
+        return default;
+    }
+
+    for (int i = 1; i < context.factor().Length; i++)
+    {
+        LLVMValueRef right = Visit(context.factor(i));
+
+        if (right.Handle == IntPtr.Zero)
         {
-            LLVMValueRef left = Visit(context.factor(0));
-            
-            if (left.Handle == IntPtr.Zero)
-            {
-                Console.Error.WriteLine("Chyba: Nepodařilo se vyhodnotit levý operand termu.");
-                return default;
-            }
-
-            for (int i = 1; i < context.factor().Length; i++)
-            {
-                LLVMValueRef right = Visit(context.factor(i));
-                
-                if (right.Handle == IntPtr.Zero)
-                {
-                    Console.Error.WriteLine("Chyba: Nepodařilo se vyhodnotit pravý operand termu.");
-                    return default;
-                }
-                
-                string op = context.GetChild(2 * i - 1).GetText();
-
-                var leftType = left.TypeOf;
-                var rightType = right.TypeOf;
-                
-                bool isDouble = leftType.Kind == LLVMTypeKind.LLVMDoubleTypeKind || 
-                                rightType.Kind == LLVMTypeKind.LLVMDoubleTypeKind;
-
-                if (isDouble)
-                {
-                    if (leftType.Kind != LLVMTypeKind.LLVMDoubleTypeKind)
-                        left = _builder.BuildSIToFP(left, _doubleType, "toDouble");
-                    if (rightType.Kind != LLVMTypeKind.LLVMDoubleTypeKind)
-                        right = _builder.BuildSIToFP(right, _doubleType, "toDouble");
-
-                    if (op == "*") left = _builder.BuildFMul(left, right, "multmp");
-                    else if (op == "/") left = _builder.BuildFDiv(left, right, "divtmp");
-                }
-                else
-                {
-                    if (op == "*") left = _builder.BuildMul(left, right, "multmp");
-                    else if (op == "/") left = _builder.BuildSDiv(left, right, "divtmp");
-                }
-            }
-            return left;
+            Console.Error.WriteLine("Chyba: Nepodařilo se vyhodnotit pravý operand termu.");
+            return default;
         }
+
+        string op = context.GetChild(2 * i - 1).GetText();
+
+        if (!TypesEqual(left.TypeOf, right.TypeOf))
+        {
+            Console.Error.WriteLine($"Chyba typů v termu: levý operand '{left.TypeOf.Kind}', pravý operand '{right.TypeOf.Kind}'.");
+            return default;
+        }
+
+        var kind = left.TypeOf.Kind;
+
+        if (kind == LLVMTypeKind.LLVMDoubleTypeKind)
+        {
+            if (op == "*") left = _builder.BuildFMul(left, right, "multmp");
+            else if (op == "/") left = _builder.BuildFDiv(left, right, "divtmp");
+            else { Console.Error.WriteLine($"Chyba: Nepodporovaný operátor '{op}' pro typ double."); return default; }
+        }
+        else if (kind == LLVMTypeKind.LLVMIntegerTypeKind)
+        {
+            if (op == "*") left = _builder.BuildMul(left, right, "multmp");
+            else if (op == "/") left = _builder.BuildSDiv(left, right, "divtmp");
+            else { Console.Error.WriteLine($"Chyba: Nepodporovaný operátor '{op}' pro typ int."); return default; }
+        }
+        else
+        {
+            Console.Error.WriteLine($"Chyba: Operace v termu není podporována pro typ '{kind}'.");
+            return default;
+        }
+    }
+    return left;
+}
 
         public override LLVMValueRef VisitFactor(AlgolSubsetParser.FactorContext context)
         {
@@ -542,11 +613,29 @@ namespace Compiler
                 if (_namedValues.TryGetValue(name, out var varInfo))
                 {
                     var (ptr, type) = varInfo;
-                    if (ptr.Handle == IntPtr.Zero)
+
+                    // Pokud máme indexy (např. mat[i, j] při čtení)
+                    if (context.expression().Length > 0)
                     {
-                        Console.Error.WriteLine($"Chyba: Neplatný pointer pro proměnnou '{name}'.");
-                        return default;
+                        var indices = new List<LLVMValueRef> { LLVMValueRef.CreateConstInt(_i32Type, 0, false) };
+
+                        foreach (var expr in context.expression())
+                        {
+                            var index = Visit(expr);
+                            var adjustedIndex = _builder.BuildSub(index,
+                                LLVMValueRef.CreateConstInt(_i32Type, 1, false), "adjustedIdx");
+                            indices.Add(adjustedIndex);
+                        }
+
+                        var elementPtr = _builder.BuildGEP2(type, ptr, indices.ToArray(), "arrayPtr");
+
+                        // Použijeme pomocnou funkci, která vrátí skutečný elementní typ (např. i32), nikoli vnitřní pole
+                        var elementType = GetArrayElementType(type);
+
+                        return _builder.BuildLoad2(elementType, elementPtr, "arrayElement");
                     }
+                    
+                    // Skalární proměnná
                     return _builder.BuildLoad2(type, ptr, name);
                 }
                 else
@@ -607,14 +696,16 @@ namespace Compiler
                     
                 return _builder.BuildCall2(printfFuncType, _printfFunc, args, "printCall");
             }
-            
+
             // Volání uživatelské funkce
             if (_functions.TryGetValue(name, out var funcInfo))
             {
                 var (func, returnType) = funcInfo;
-                
+
                 // Zpracování argumentů
                 var args = new List<LLVMValueRef>();
+                var paramTypes = new List<LLVMTypeRef>();
+
                 foreach (var expr in context.expression())
                 {
                     var arg = Visit(expr);
@@ -624,14 +715,47 @@ namespace Compiler
                         return default;
                     }
                     args.Add(arg);
+                    paramTypes.Add(arg.TypeOf);
                 }
 
-                var funcType = func.TypeOf.ElementType;
+                // Rekonstrukce typu funkce
+                var funcType = LLVMTypeRef.CreateFunction(returnType, paramTypes.ToArray(), false);
                 return _builder.BuildCall2(funcType, func, args.ToArray(), "calltmp");
             }
 
             Console.Error.WriteLine($"Chyba: Neznámá procedura '{name}'.");
             return default;
         }
+
+// Pomocné metody - vložte do třídy
+private LLVMTypeRef GetArrayElementType(LLVMTypeRef arrayType)
+{
+    var current = arrayType;
+    while (current.Kind == LLVMTypeKind.LLVMArrayTypeKind || current.Kind == LLVMTypeKind.LLVMPointerTypeKind && current.ElementType.Kind == LLVMTypeKind.LLVMArrayTypeKind)
+    {
+        // pokud je pointer na array (např. global string ptr), vezmeme element
+        current = current.ElementType;
+    }
+    // Pokud je stále pole, vrátíme element type
+    while (current.Kind == LLVMTypeKind.LLVMArrayTypeKind)
+    {
+        current = current.ElementType;
+    }
+    return current;
+}
+
+private bool TypesEqual(LLVMTypeRef a, LLVMTypeRef b)
+{
+    if (a.Handle == IntPtr.Zero || b.Handle == IntPtr.Zero) return false;
+    // Porovnání podle Kind; u pointerů (string) stačí Kind==Pointer
+    if (a.Kind != b.Kind) return false;
+    // U pole/double/int lze porovnat Kind, u pointerů lze porovnat element typ
+    if (a.Kind == LLVMTypeKind.LLVMPointerTypeKind)
+    {
+        // pro jednoduchost považujeme všechny pointery za kompatibilní pouze v případě, že mají stejný element typ
+        return a.ElementType.Kind == b.ElementType.Kind;
+    }
+    return true;
+}
     }
 }
