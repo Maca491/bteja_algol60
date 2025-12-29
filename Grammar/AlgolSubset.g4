@@ -110,7 +110,8 @@ term
     ;
 
 factor
-    : NUMBER
+    : INT_LITERAL
+    | REAL_LITERAL
     | STRING
     | IDENT                                              
     | procedure_call
@@ -122,8 +123,12 @@ IDENT
     : [a-zA-Z_] [a-zA-Z0-9_]*
     ;
 
-NUMBER
-    : [0-9]+ ('.' [0-9]+)?
+INT_LITERAL
+    : [0-9]+
+    ;
+
+REAL_LITERAL
+    : [0-9]+ '.' [0-9]+
     ;
 
 STRING
@@ -142,12 +147,12 @@ type_list
     : type (',' type)*
     ;
 
-//Jednoøádkové komentáøe
+//JednoÅ™Ã¡dkovÃ© komentÃ¡Å™e
 COMMENT
     : '//' ~[\r\n]* -> skip
     ;
 
-//Víceøádkové komentáøe
+//VÃ­ceÅ™Ã¡dkovÃ© komentÃ¡Å™e
 BLOCK_COMMENT
     : '/*' .*? '*/' -> skip
     ;

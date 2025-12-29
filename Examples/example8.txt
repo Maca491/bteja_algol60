@@ -31,13 +31,17 @@ begin
   for i := 1 step 1 until 5 do
     arr1[i] := i * 10;
   
-  // NOVE: Prirazeni celeho pole
+  // Prirazeni celeho pole
   arr2 := arr1;
+  for i := 1 step 1 until 5 do
+    print(arr2[i]);
   
   // Test rekurze
   n := 5;
   result := factorial(n);
+  print(result);
   result := fib(6);
+  print(result);
   
   return result;
 end

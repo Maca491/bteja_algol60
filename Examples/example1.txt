@@ -9,5 +9,5 @@ begin
   message := "Vysledek";
   print(message);
   print(x);
-  return x;
+  return 0;
 end

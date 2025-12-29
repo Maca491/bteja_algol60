@@ -1,3 +1,6 @@
+using System;
+using System.Collections.Generic;
+
 public class SemanticAnalyzer : AlgolSubsetBaseVisitor<object>
 {
     // Hierarchická tabulka symbolù pro podporu vnoøených rozsahù
@@ -24,6 +27,14 @@ public class SemanticAnalyzer : AlgolSubsetBaseVisitor<object>
     {
         // Globální rozsah
         scopes.Push(new Dictionary<string, SymbolInfo>());
+
+        // Registrovat vestavìné symboly (napø. print), aby se nehlásily jako nedeclarované
+        // (atributy lze rozšíøit pozdìji, pokud budete kontrolovat signatury)
+        DeclareSymbol("print", new SymbolInfo
+        {
+            Type = "void",
+            Kind = SymbolKind.Procedure
+        });
     }
 
     private void EnterScope()
@@ -231,6 +242,13 @@ public class SemanticAnalyzer : AlgolSubsetBaseVisitor<object>
 
     public override object VisitFactor(AlgolSubsetParser.FactorContext context)
     {
+        // Po zmìnì gramatiky máme samostatné tokeny INT_LITERAL a REAL_LITERAL.
+        // Nevyvolávají chybu nedeclarovaného identifikátoru, proto je ignorujeme zde.
+        if (context.INT_LITERAL() != null || context.REAL_LITERAL() != null || context.STRING() != null)
+        {
+            return null; // literály jsou v poøádku
+        }
+
         if (context.IDENT() != null && context.expression().Length == 0 && context.procedure_call() == null)
         {
             // Samotný identifikátor (promìnná nebo pole jako celek)

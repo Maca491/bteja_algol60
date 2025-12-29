@@ -297,7 +297,124 @@ public override LLVMValueRef VisitFunction_decl(AlgolSubsetParser.Function_declC
             return default;
         }
 
-        // Upravit VisitAssignment - zakázat automatickou konverzi, hlásit chybu při mismatch
+        // Přidáno: efektivní kopírování polí pomocí llvm.memcpy a podpora vícerozměrných polí (kopírování celé paměti)
+private (List<ulong> dims, LLVMTypeRef elementType) GetArrayDimensionsAndElementType(LLVMTypeRef arrayType)
+{
+    var dims = new List<ulong>();
+    var current = arrayType;
+    while (current.Kind == LLVMTypeKind.LLVMArrayTypeKind)
+    {
+        dims.Add(current.ArrayLength);
+        current = current.ElementType;
+    }
+    return (dims, current);
+}
+
+private ulong GetElementSizeInBytes(LLVMTypeRef t)
+{
+    // Jednoduchý odhad velikosti primitivních typů pro cílovou platformu x86_64.
+    // Pokud potřebujete přesné hodnoty z DataLayout, rozšíříme později.
+    switch (t.Kind)
+    {
+        case LLVMTypeKind.LLVMIntegerTypeKind:
+            // IntWidth je v bitech (např. 32)
+            return (ulong)(t.IntWidth / 8);
+        case LLVMTypeKind.LLVMDoubleTypeKind:
+            return 8UL;
+        case LLVMTypeKind.LLVMFloatTypeKind:
+            return 4UL;
+        case LLVMTypeKind.LLVMPointerTypeKind:
+            return (ulong)IntPtr.Size;
+        default:
+            // Bezpečný fallback na pointer-size
+            return (ulong)IntPtr.Size;
+    }
+}
+
+// Nahrazena EmitArrayMemCpy: stabilní element-wise copy (flattened) místo problémového llvm.memcpy
+private void EmitArrayMemCpy(LLVMValueRef dstAllocaPtr, LLVMTypeRef dstType, LLVMValueRef srcAllocaPtr, LLVMTypeRef srcType)
+{
+    // Normalizace: pokud máme pointer-to-array (alloca vrací ptr na array), zjistíme array typ
+    var dstArrayType = dstType.Kind == LLVMTypeKind.LLVMPointerTypeKind ? dstType.ElementType : dstType;
+    var srcArrayType = srcType.Kind == LLVMTypeKind.LLVMPointerTypeKind ? srcType.ElementType : srcType;
+
+    if (dstArrayType.Kind != LLVMTypeKind.LLVMArrayTypeKind || srcArrayType.Kind != LLVMTypeKind.LLVMArrayTypeKind)
+    {
+        Console.Error.WriteLine("Chyba: EmitArrayMemCpy očekává typ pole.");
+        return;
+    }
+
+    // Rozměry a element typ
+    var (dstDims, dstElem) = GetArrayDimensionsAndElementType(dstArrayType);
+    var (srcDims, srcElem) = GetArrayDimensionsAndElementType(srcArrayType);
+
+    // Kompatibilita: stejné dimenze a element typ
+    if (dstDims.Count != srcDims.Count)
+    {
+        Console.Error.WriteLine("Chyba: Přiřazení polí - rozdílný počet rozměrů.");
+        return;
+    }
+    for (int i = 0; i < dstDims.Count; i++)
+    {
+        if (dstDims[i] != srcDims[i])
+        {
+            Console.Error.WriteLine("Chyba: Přiřazení polí - rozměry nejsou kompatibilní.");
+            return;
+        }
+    }
+    if (!TypesEqual(dstElem, srcElem))
+    {
+        Console.Error.WriteLine("Chyba: Přiřazení polí - element typy nejsou kompatibilní.");
+        return;
+    }
+
+    // Spočítat celkový počet prvků (flattened)
+    ulong totalElements = 1;
+    foreach (var d in dstDims) totalElements *= d;
+
+    // Získat pointer na první element (elementType*)
+    var zero = LLVMValueRef.CreateConstInt(_i32Type, 0UL, false);
+    var dstFirstElemPtr = _builder.BuildGEP2(dstArrayType, dstAllocaPtr, new[] { zero, zero }, "dst_first_elem"); // elementType*
+    var srcFirstElemPtr = _builder.BuildGEP2(srcArrayType, srcAllocaPtr, new[] { zero, zero }, "src_elem_ptr"); // elementType*
+
+    // Index proměnná (i32)
+    var idxAlloca = _builder.BuildAlloca(_i32Type, "arrcpy_idx");
+    _builder.BuildStore(LLVMValueRef.CreateConstInt(_i32Type, 0UL, false), idxAlloca);
+
+    // Bloky smyčky
+    var condBlock = _context.AppendBasicBlock(_currentFunction, "arrcpy.cond");
+    var bodyBlock = _context.AppendBasicBlock(_currentFunction, "arrcpy.body");
+    var afterBlock = _context.AppendBasicBlock(_currentFunction, "arrcpy.after");
+
+    _builder.BuildBr(condBlock);
+
+    // Podmínka
+    _builder.PositionAtEnd(condBlock);
+    var idx = _builder.BuildLoad2(_i32Type, idxAlloca, "idx");
+    var totalConst = LLVMValueRef.CreateConstInt(_i32Type, (ulong)totalElements, false);
+    var cmp = _builder.BuildICmp(LLVMIntPredicate.LLVMIntSLT, idx, totalConst, "ltcond");
+    _builder.BuildCondBr(cmp, bodyBlock, afterBlock);
+
+    // Tělo smyčky (kopíruj element)
+    _builder.PositionAtEnd(bodyBlock);
+
+    // GEP na elementType* + idx
+    var dstElemPtr = _builder.BuildGEP2(dstElem, dstFirstElemPtr, new[] { idx }, "dst_elem_ptr");
+    var srcElemPtr = _builder.BuildGEP2(srcElem, srcFirstElemPtr, new[] { idx }, "src_elem_ptr");
+
+    // Načteme a uložíme
+    var loaded = _builder.BuildLoad2(dstElem, srcElemPtr, "src_elem");
+    _builder.BuildStore(loaded, dstElemPtr);
+
+    // idx++
+    var next = _builder.BuildAdd(idx, LLVMValueRef.CreateConstInt(_i32Type, 1UL, false), "idx_next");
+    _builder.BuildStore(next, idxAlloca);
+    _builder.BuildBr(condBlock);
+
+    // After
+    _builder.PositionAtEnd(afterBlock);
+}
+
 public override LLVMValueRef VisitAssignment(AlgolSubsetParser.AssignmentContext context)
 {
     string name = context.IDENT().GetText();
@@ -310,17 +427,17 @@ public override LLVMValueRef VisitAssignment(AlgolSubsetParser.AssignmentContext
 
     var (ptr, targetType) = _namedValues[name];
 
-    // Zpracování indexů pole (mat[i, j])
+    // Zpracování indexů pole (přiřazení do elementu)
     if (context.expression().Length > 1)
     {
-        var indices = new List<LLVMValueRef> { LLVMValueRef.CreateConstInt(_i32Type, 0, false) };
+        var indices = new List<LLVMValueRef> { LLVMValueRef.CreateConstInt(_i32Type, 0UL, false) };
 
         for (int i = 0; i < context.expression().Length - 1; i++)
         {
             var index = Visit(context.expression(i));
             if (index.Handle == IntPtr.Zero) { Console.Error.WriteLine("Chyba: Nepodařilo se vyhodnotit index pole."); return default; }
             var adjustedIndex = _builder.BuildSub(index,
-                LLVMValueRef.CreateConstInt(_i32Type, 1, false), "adjustedIdx");
+                LLVMValueRef.CreateConstInt(_i32Type, 1UL, false), "adjustedIdx");
             indices.Add(adjustedIndex);
         }
 
@@ -343,29 +460,53 @@ public override LLVMValueRef VisitAssignment(AlgolSubsetParser.AssignmentContext
         _builder.BuildStore(assignedValue, elementPtr);
         return assignedValue;
     }
-    
-    // Skalární proměnné
+
+    // Přiřazení celého pole: arr2 := arr1
     int exprIndex = context.expression().Length - 1;
-            LLVMValueRef value = Visit(context.expression(exprIndex));
-            
-            if (value.Handle == IntPtr.Zero)
-            {
-                Console.Error.WriteLine($"Chyba: Nepodařilo se vyhodnotit výraz pro proměnnou '{name}'.");
-                return default;
-            }
+    var rhsExpr = context.expression(exprIndex);
 
-            var valueType = value.TypeOf;
+    bool targetIsArray = targetType.Kind == LLVMTypeKind.LLVMArrayTypeKind
+                         || (targetType.Kind == LLVMTypeKind.LLVMPointerTypeKind && targetType.ElementType.Kind == LLVMTypeKind.LLVMArrayTypeKind);
 
-            // Přísné porovnání typů - žádná automatická konverze
-            if (!TypesEqual(valueType, targetType))
-            {
-                Console.Error.WriteLine($"Chyba typů: nelze přiřadit hodnotu typu '{valueType.Kind}' do proměnné '{name}' typu '{targetType.Kind}'.");
-                return default;
-            }
+    if (targetIsArray)
+    {
+        // Povolené RHS pouze simple IDENT (jméno pole) pro jednoduchost
+        string rhsText = rhsExpr.GetText();
 
-            _builder.BuildStore(value, ptr);
-            return value;
+        if (_namedValues.TryGetValue(rhsText, out var srcInfo))
+        {
+            var (srcPtr, srcType) = srcInfo;
+
+            // Normalizace a kontrola kompatibility provedena v EmitArrayMemCpy
+            EmitArrayMemCpy(ptr, targetType, srcPtr, srcType);
+            return default;
         }
+
+        Console.Error.WriteLine("Chyba: Přiřazení pole z výrazů jiných než pojmenované pole není podporováno.");
+        return default;
+    }
+
+    // Skalární proměnné (původní chování)
+    LLVMValueRef value = Visit(context.expression(exprIndex));
+
+    if (value.Handle == IntPtr.Zero)
+    {
+        Console.Error.WriteLine($"Chyba: Nepodařilo se vyhodnotit výraz pro proměnnou '{name}'.");
+        return default;
+    }
+
+    var valueType = value.TypeOf;
+
+    // Přísné porovnání typů - žádná automatická konverze
+    if (!TypesEqual(valueType, targetType))
+    {
+        Console.Error.WriteLine($"Chyba typů: nelze přiřadit hodnotu typu '{valueType.Kind}' do proměnné '{name}' typu '{targetType.Kind}'.");
+        return default;
+    }
+
+    _builder.BuildStore(value, ptr);
+    return value;
+}
 
         public override LLVMValueRef VisitIf_statement(AlgolSubsetParser.If_statementContext context)
         {
@@ -384,9 +525,15 @@ public override LLVMValueRef VisitAssignment(AlgolSubsetParser.AssignmentContext
 
             // Podmíněný skok
             var condType = condition.TypeOf;
-            if (condType.Kind != LLVMTypeKind.LLVMIntegerTypeKind || condType.IntWidth != 1)
+            if (condType.Kind == LLVMTypeKind.LLVMDoubleTypeKind)
             {
-                // Konverze na bool (i1)
+                // Konverze double na bool (i1)
+                var zero = LLVMValueRef.CreateConstReal(_doubleType, 0.0);
+                condition = _builder.BuildFCmp(LLVMRealPredicate.LLVMRealONE, condition, zero, "ifcond");
+            }
+            else if (condType.Kind != LLVMTypeKind.LLVMIntegerTypeKind || condType.IntWidth != 1)
+            {
+                // Konverze na bool (i1) pro integer (ne i1)
                 condition = _builder.BuildICmp(LLVMIntPredicate.LLVMIntNE, condition, 
                     LLVMValueRef.CreateConstInt(condition.TypeOf, 0, false), "ifcond");
             }
@@ -446,10 +593,18 @@ public override LLVMValueRef VisitAssignment(AlgolSubsetParser.AssignmentContext
             }
             _builder.BuildStore(startVal, varPtr);
 
-            // Krok (pokud existuje)
-            var stepVal = context.expression().Length > 1 && context.GetChild(5).GetText() == "step"
-                ? Visit(context.expression(1))
-                : LLVMValueRef.CreateConstInt(_i32Type, 1, false);
+            // Krok (pokud existuje) - default podle typu smyčové proměnné
+            LLVMValueRef stepVal;
+            if (context.expression().Length > 1 && context.GetChild(5).GetText() == "step")
+            {
+                stepVal = Visit(context.expression(1));
+            }
+            else
+            {
+                stepVal = varType.Kind == LLVMTypeKind.LLVMDoubleTypeKind
+                    ? LLVMValueRef.CreateConstReal(_doubleType, 1.0)
+                    : LLVMValueRef.CreateConstInt(_i32Type, 1, false);
+            }
 
             // Konečná hodnota
             int endExprIndex = context.expression().Length - 1;
@@ -467,11 +622,24 @@ public override LLVMValueRef VisitAssignment(AlgolSubsetParser.AssignmentContext
 
             // Inkrement
             var currentVal = _builder.BuildLoad2(varType, varPtr, loopVar);
-            var nextVal = _builder.BuildAdd(currentVal, stepVal, "nextval");
+            LLVMValueRef nextVal;
+            if (varType.Kind == LLVMTypeKind.LLVMDoubleTypeKind)
+                nextVal = _builder.BuildFAdd(currentVal, stepVal, "nextval");
+            else
+                nextVal = _builder.BuildAdd(currentVal, stepVal, "nextval");
+
             _builder.BuildStore(nextVal, varPtr);
 
             // Podmínka pokračování
-            var loopCond = _builder.BuildICmp(LLVMIntPredicate.LLVMIntSLE, nextVal, endVal, "loopcond");
+            LLVMValueRef loopCond;
+            if (varType.Kind == LLVMTypeKind.LLVMDoubleTypeKind)
+            {
+                loopCond = _builder.BuildFCmp(LLVMRealPredicate.LLVMRealOLE, nextVal, endVal, "loopcond");
+            }
+            else
+            {
+                loopCond = _builder.BuildICmp(LLVMIntPredicate.LLVMIntSLE, nextVal, endVal, "loopcond");
+            }
             _builder.BuildCondBr(loopCond, loopBlock, afterBlock);
 
             _builder.PositionAtEnd(afterBlock);
@@ -568,20 +736,39 @@ public override LLVMValueRef VisitSimple_expr(AlgolSubsetParser.Simple_exprConte
                 var right = Visit(context.simple_expr(1));
                 string op = context.rel_op().GetText();
 
-                LLVMIntPredicate predicate = op switch
+                // Pokud jsou oba real, použijeme FCmp, jinak ICmp
+                if (left.TypeOf.Kind == LLVMTypeKind.LLVMDoubleTypeKind && right.TypeOf.Kind == LLVMTypeKind.LLVMDoubleTypeKind)
                 {
-                    "=" => LLVMIntPredicate.LLVMIntEQ,
-                    "!=" => LLVMIntPredicate.LLVMIntNE,
-                    "<" => LLVMIntPredicate.LLVMIntSLT,
-                    "<=" => LLVMIntPredicate.LLVMIntSLE,
-                    ">" => LLVMIntPredicate.LLVMIntSGT,
-                    ">=" => LLVMIntPredicate.LLVMIntSGE,
-                    _ => LLVMIntPredicate.LLVMIntEQ
-                };
+                    LLVMRealPredicate rpred = op switch
+                    {
+                        "=" => LLVMRealPredicate.LLVMRealOEQ,
+                        "!=" => LLVMRealPredicate.LLVMRealONE,
+                        "<" => LLVMRealPredicate.LLVMRealOLT,
+                        "<=" => LLVMRealPredicate.LLVMRealOLE,
+                        ">" => LLVMRealPredicate.LLVMRealOGT,
+                        ">=" => LLVMRealPredicate.LLVMRealOGE,
+                        _ => LLVMRealPredicate.LLVMRealOEQ
+                    };
 
-                var cmp = _builder.BuildICmp(predicate, left, right, "cmptmp");
-                // Rozšíření i1 na i32
-                return _builder.BuildZExt(cmp, _i32Type, "booltmp");
+                    var cmp = _builder.BuildFCmp(rpred, left, right, "cmptmp");
+                    return _builder.BuildZExt(cmp, _i32Type, "booltmp");
+                }
+                else
+                {
+                    LLVMIntPredicate predicate = op switch
+                    {
+                        "=" => LLVMIntPredicate.LLVMIntEQ,
+                        "!=" => LLVMIntPredicate.LLVMIntNE,
+                        "<" => LLVMIntPredicate.LLVMIntSLT,
+                        "<=" => LLVMIntPredicate.LLVMIntSLE,
+                        ">" => LLVMIntPredicate.LLVMIntSGT,
+                        ">=" => LLVMIntPredicate.LLVMIntSGE,
+                        _ => LLVMIntPredicate.LLVMIntEQ
+                    };
+
+                    var cmp = _builder.BuildICmp(predicate, left, right, "cmptmp");
+                    return _builder.BuildZExt(cmp, _i32Type, "booltmp");
+                }
             }
 
             return left;
@@ -632,7 +819,7 @@ public override LLVMValueRef VisitTerm(AlgolSubsetParser.TermContext context)
         }
         else
         {
-            Console.Error.WriteLine($"Chyba: Operace v termu není podporována pro typ '{kind}'.");
+            Console.Error.WriteLine($"Chyba: Operace v termu není suportována pro typ '{kind}'.");
             return default;
         }
     }
@@ -641,25 +828,24 @@ public override LLVMValueRef VisitTerm(AlgolSubsetParser.TermContext context)
 
         public override LLVMValueRef VisitFactor(AlgolSubsetParser.FactorContext context)
         {
-            if (context.NUMBER() != null)
+            if (context.REAL_LITERAL() != null)
             {
-                string text = context.NUMBER().GetText();
-                
-                if (text.Contains("."))
+                string text = context.REAL_LITERAL().GetText();
+                if (double.TryParse(text, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double val))
                 {
-                    if (double.TryParse(text, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double val))
-                    {
-                        return LLVMValueRef.CreateConstReal(_doubleType, val);
-                    }
+                    return LLVMValueRef.CreateConstReal(_doubleType, val);
                 }
-                else
+                Console.Error.WriteLine($"Chyba: Nelze parsovat real číslo '{text}'.");
+                return default;
+            }
+            else if (context.INT_LITERAL() != null)
+            {
+                string text = context.INT_LITERAL().GetText();
+                if (long.TryParse(text, out long val))
                 {
-                    if (long.TryParse(text, out long val))
-                    {
-                        return LLVMValueRef.CreateConstInt(_i32Type, (ulong)val, false);
-                    }
+                    return LLVMValueRef.CreateConstInt(_i32Type, (ulong)val, false);
                 }
-                Console.Error.WriteLine($"Chyba: Nelze parsovat číslo '{text}'.");
+                Console.Error.WriteLine($"Chyba: Nelze parsovat int číslo '{text}'.");
                 return default;
             }
             else if (context.STRING() != null)
@@ -686,13 +872,13 @@ public override LLVMValueRef VisitTerm(AlgolSubsetParser.TermContext context)
                     // (indexování pole - stávající kód)
                     if (context.expression().Length > 0)
                     {
-                        var indices = new List<LLVMValueRef> { LLVMValueRef.CreateConstInt(_i32Type, 0, false) };
+                        var indices = new List<LLVMValueRef> { LLVMValueRef.CreateConstInt(_i32Type, 0UL, false) };
 
                         foreach (var expr in context.expression())
                         {
                             var index = Visit(expr);
                             var adjustedIndex = _builder.BuildSub(index,
-                                LLVMValueRef.CreateConstInt(_i32Type, 1, false), "adjustedIdx");
+                                LLVMValueRef.CreateConstInt(_i32Type, 1UL, false), "adjustedIdx");
                             indices.Add(adjustedIndex);
                         }
 
