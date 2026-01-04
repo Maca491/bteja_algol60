@@ -3,7 +3,7 @@ using System.Collections.Generic;
 
 public class SemanticAnalyzer : AlgolSubsetBaseVisitor<object>
 {
-    // Hierarchick· tabulka symbol˘ pro podporu vno¯en˝ch rozsah˘
+    // Hierarchick√° tabulka symbol≈Ø pro podporu vno≈ôen√Ωch rozsah≈Ø
     private Stack<Dictionary<string, SymbolInfo>> scopes = new Stack<Dictionary<string, SymbolInfo>>();
     private Dictionary<string, SymbolInfo> currentScope => scopes.Peek();
 
@@ -13,7 +13,7 @@ public class SemanticAnalyzer : AlgolSubsetBaseVisitor<object>
         public SymbolKind Kind { get; set; }
         public string ReturnType { get; set; } // Pro funkce
         public bool IsArray { get; set; }
-        public bool IsFunctionType { get; set; } // NOV…: Je to funkËnÌ typ?
+        public bool IsFunctionType { get; set; } 
     }
 
     public enum SymbolKind
@@ -25,11 +25,10 @@ public class SemanticAnalyzer : AlgolSubsetBaseVisitor<object>
 
     public SemanticAnalyzer()
     {
-        // Glob·lnÌ rozsah
+        // Glob√°ln√≠ rozsah
         scopes.Push(new Dictionary<string, SymbolInfo>());
 
-        // Registrovat vestavÏnÈ symboly (nap¯. print), aby se nehl·sily jako nedeclarovanÈ
-        // (atributy lze rozöÌ¯it pozdÏji, pokud budete kontrolovat signatury)
+        // Registrovat vestavƒõn√© symboly (nap≈ô. print), aby se nehl√°sily jako nedeclarovan√©
         DeclareSymbol("print", new SymbolInfo
         {
             Type = "void",
@@ -49,7 +48,7 @@ public class SemanticAnalyzer : AlgolSubsetBaseVisitor<object>
 
     private SymbolInfo LookupSymbol(string name)
     {
-        // Hled· symbol od aktu·lnÌho rozsahu smÏrem ke glob·lnÌmu
+        // Hled√° symbol od aktu√°ln√≠ho rozsahu smƒõrem ke glob√°ln√≠mu
         foreach (var scope in scopes)
         {
             if (scope.ContainsKey(name))
@@ -64,11 +63,88 @@ public class SemanticAnalyzer : AlgolSubsetBaseVisitor<object>
     {
         if (currentScope.ContainsKey(name))
         {
-            Console.WriteLine($"Chyba: Symbol '{name}' je jiû deklarov·n v aktu·lnÌm rozsahu.");
+            Console.WriteLine($"Chyba: Symbol '{name}' je ji≈æ deklarov√°n v aktu√°ln√≠m rozsahu.");
             return false;
         }
         currentScope[name] = info;
         return true;
+    }
+
+    private bool IsNumericType(string typeName)
+    {
+        // Normalizace typu (odstranƒõn√≠ mezery a array specifikace)
+        var normalizedType = typeName.Trim().ToLower();
+        
+        if (normalizedType.StartsWith("array"))
+        {
+            // Pro pole z√≠sk√°me element typ
+            var ofIndex = normalizedType.IndexOf("of");
+            if (ofIndex >= 0)
+            {
+                normalizedType = normalizedType.Substring(ofIndex + 2).Trim();
+            }
+        }
+        
+        return normalizedType == "int" || normalizedType == "real";
+    }
+
+    private string GetExpressionType(AlgolSubsetParser.ExpressionContext context)
+    {
+        // Zjednodu≈°en√° inference typu v√Ωrazu
+        // V re√°ln√©m analyz√°toru by byla komplexnƒõj≈°√≠
+        
+        if (context.simple_expr().Length == 1)
+        {
+            return GetSimpleExprType(context.simple_expr(0));
+        }
+        
+        // Relaƒçn√≠ operace vracej√≠ boolean (reprezentovan√Ω jako int)
+        return "int";
+    }
+
+    private string GetSimpleExprType(AlgolSubsetParser.Simple_exprContext context)
+    {
+        // Z√≠skat typ prvn√≠ho termu
+        return GetTermType(context.term(0));
+    }
+
+    private string GetTermType(AlgolSubsetParser.TermContext context)
+    {
+        return GetFactorType(context.factor(0));
+    }
+
+    private string GetFactorType(AlgolSubsetParser.FactorContext context)
+    {
+        if (context.INT_LITERAL() != null)
+            return "int";
+        
+        if (context.REAL_LITERAL() != null)
+            return "real";
+        
+        if (context.STRING() != null)
+            return "string";
+        
+        if (context.IDENT() != null && context.procedure_call() == null)
+        {
+            string name = context.IDENT().GetText();
+            var symbol = LookupSymbol(name);
+            return symbol?.Type ?? "unknown";
+        }
+        
+        if (context.procedure_call() != null)
+        {
+            string name = context.procedure_call().IDENT().GetText();
+            var symbol = LookupSymbol(name);
+            return symbol?.ReturnType ?? "unknown";
+        }
+        
+        if (context.expression().Length > 0 && context.IDENT() == null)
+        {
+            // V√Ωraz v z√°vork√°ch
+            return GetExpressionType(context.expression(0));
+        }
+        
+        return "unknown";
     }
 
     public override object VisitVariable_decl(AlgolSubsetParser.Variable_declContext context)
@@ -100,16 +176,16 @@ public class SemanticAnalyzer : AlgolSubsetBaseVisitor<object>
             Kind = SymbolKind.Procedure
         });
 
-        // Vstup do novÈho rozsahu pro proceduru
+        // Vstup do nov√©ho rozsahu pro proceduru
         EnterScope();
 
-        // Zpracov·nÌ parametr˘
+        // Zpracov√°n√≠ parametr≈Ø
         if (context.param_list() != null)
         {
             Visit(context.param_list());
         }
 
-        // Zpracov·nÌ tÏla procedury (m˘ûe obsahovat vno¯enÈ deklarace)
+        // Zpracov√°n√≠ tƒõla procedury (m≈Ø≈æe obsahovat vno≈ôen√© deklarace)
         Visit(context.block());
 
         ExitScope();
@@ -128,18 +204,18 @@ public class SemanticAnalyzer : AlgolSubsetBaseVisitor<object>
             ReturnType = returnType
         });
 
-        Console.WriteLine($"Info: Deklarov·na funkce '{name}' s n·vratov˝m typem '{returnType}'");
+        Console.WriteLine($"Info: Deklarov√°na funkce '{name}' s n√°vratov√Ωm typem '{returnType}'");
 
-        // Vstup do novÈho rozsahu pro funkci
+        // Vstup do nov√©ho rozsahu pro funkci
         EnterScope();
 
-        // Zpracov·nÌ parametr˘
+        // Zpracov√°n√≠ parametr≈Ø 
         if (context.param_list() != null)
         {
             Visit(context.param_list());
         }
 
-        // Zpracov·nÌ tÏla funkce (m˘ûe obsahovat vno¯enÈ deklarace)
+        // Zpracov√°n√≠ tƒõla funkce (m≈Ø≈æe obsahovat vno≈ôen√© deklarace)
         Visit(context.block());
 
         ExitScope();
@@ -151,9 +227,9 @@ public class SemanticAnalyzer : AlgolSubsetBaseVisitor<object>
         string name = context.IDENT().GetText();
         string type = context.type().GetText();
         bool isArray = context.type().array_type() != null;
-        bool isFunctionType = context.type().function_type() != null; // NOV…: Kontrola funkËnÌho typu
+        bool isFunctionType = context.type().function_type() != null; // NOVƒö: Kontrola funkƒçn√≠ho typu
 
-        // NOV…: RozliöenÌ funkËnÌho parametru
+        // Rozli≈°en√≠ funkƒçn√≠ho parametru
         var kind = isFunctionType ? SymbolKind.Function : SymbolKind.Variable;
 
         DeclareSymbol(name, new SymbolInfo
@@ -166,7 +242,7 @@ public class SemanticAnalyzer : AlgolSubsetBaseVisitor<object>
 
         if (isFunctionType)
         {
-            Console.WriteLine($"Info: Parametr '{name}' je funkËnÌho typu: {type}");
+            Console.WriteLine($"Info: Parametr '{name}' je funkÔøΩnÔøΩho typu: {type}");
         }
 
         return null;
@@ -174,7 +250,7 @@ public class SemanticAnalyzer : AlgolSubsetBaseVisitor<object>
 
     public override object VisitBlock(AlgolSubsetParser.BlockContext context)
     {
-        // Zpracov·nÌ vöech deklaracÌ a p¯Ìkaz˘ v bloku
+        // Zpracov√°n√≠ v≈°ech deklarac√≠ a p≈ô√≠kaz≈Ø v bloku
         return VisitChildren(context);
     }
 
@@ -185,14 +261,14 @@ public class SemanticAnalyzer : AlgolSubsetBaseVisitor<object>
         
         if (symbol == null)
         {
-            Console.WriteLine($"Chyba: PromÏnn· '{name}' nenÌ deklarov·na.");
+            Console.WriteLine($"Chyba: Promƒõnn√° '{name}' nen√≠ deklarov√°na.");
         }
         else if (symbol.Kind != SymbolKind.Variable)
         {
-            Console.WriteLine($"Chyba: '{name}' nenÌ promÏnn· (je to {symbol.Kind}).");
+            Console.WriteLine($"Chyba: '{name}' nen√≠ promƒõnn√° (je to {symbol.Kind}).");
         }
 
-        // Zkontrolovat pravou stranu p¯i¯azenÌ
+        // Zkontrolovat pravou stranu p≈ôi≈ôazen√≠
         if (context.expression() != null && context.expression().Length > 0)
         {
             Visit(context.expression(0));
@@ -208,11 +284,11 @@ public class SemanticAnalyzer : AlgolSubsetBaseVisitor<object>
         
         if (symbol == null)
         {
-            Console.WriteLine($"Chyba: Procedura/funkce '{name}' nenÌ deklarov·na.");
+            Console.WriteLine($"Chyba: Procedura/funkce '{name}' nen√≠ deklarov√°na.");
         }
         else if (symbol.Kind != SymbolKind.Procedure && symbol.Kind != SymbolKind.Function)
         {
-            Console.WriteLine($"Chyba: '{name}' nenÌ procedura ani funkce.");
+            Console.WriteLine($"Chyba: '{name}' nen√≠     procedura ani funkce.");
         }
         else
         {
@@ -221,8 +297,8 @@ public class SemanticAnalyzer : AlgolSubsetBaseVisitor<object>
             {
                 if (scope.ContainsKey(name))
                 {
-                    string scopeType = currentScopeLevel == scopes.Count - 1 ? "glob·lnÌ" : "lok·lnÌ";
-                    Console.WriteLine($"Info: Vol·na {scopeType} {symbol.Kind.ToString().ToLower()} '{name}'");
+                    string scopeType = currentScopeLevel == scopes.Count - 1 ? "glob√°lnƒõ" : "lok√°lnƒõ";
+                    Console.WriteLine($"Info: Vol√°na {scopeType} {symbol.Kind.ToString().ToLower()} '{name}'");
                     break;
                 }
                 currentScopeLevel++;
@@ -242,24 +318,116 @@ public class SemanticAnalyzer : AlgolSubsetBaseVisitor<object>
 
     public override object VisitFactor(AlgolSubsetParser.FactorContext context)
     {
-        // Po zmÏnÏ gramatiky m·me samostatnÈ tokeny INT_LITERAL a REAL_LITERAL.
-        // Nevyvol·vajÌ chybu nedeclarovanÈho identifik·toru, proto je ignorujeme zde.
+        // Po zmƒõnƒõ gramatiky m√°me samostatn√© tokeny INT_LITERAL a REAL_LITERAL.
         if (context.INT_LITERAL() != null || context.REAL_LITERAL() != null || context.STRING() != null)
         {
-            return null; // liter·ly jsou v po¯·dku
+            return null; // liter√°ly jsou v po≈ô√°dku
         }
 
         if (context.IDENT() != null && context.expression().Length == 0 && context.procedure_call() == null)
         {
-            // Samotn˝ identifik·tor (promÏnn· nebo pole jako celek)
+            // Samotn√Ω identifik√°tor (promƒõnn√° nebo pole jako celek)
             string name = context.IDENT().GetText();
             var symbol = LookupSymbol(name);
             
             if (symbol == null)
             {
-                Console.WriteLine($"Chyba: Identifik·tor '{name}' nenÌ deklarov·n.");
+                Console.WriteLine($"Chyba: Identifik√°tor '{name}' nen√≠ deklarov√°n.");
             }
         }
         return VisitChildren(context);
+    }
+
+    public override object VisitSimple_expr(AlgolSubsetParser.Simple_exprContext context)
+    {
+        // Nav≈°t√≠vit v≈°echny termy
+        foreach (var term in context.term())
+        {
+            Visit(term);
+        }
+        
+        // Kontrola typ≈Ø pro aritmetick√© operace (+, -)
+        if (context.term().Length > 1)
+        {
+            for (int i = 0; i < context.term().Length; i++)
+            {
+                string termType = GetTermType(context.term(i));
+                
+                if (!IsNumericType(termType))
+                {
+                    Console.WriteLine($"Chyba: Aritmetick√© operace (+/-) nen√≠ povolena pro typ '{termType}'. Povoleny jsou pouze typy 'int' a 'real'.");
+                }
+                
+                // Kontrola kompatibility typ≈Ø mezi operandy
+                if (i > 0)
+                {
+                    string prevTermType = GetTermType(context.term(i-1));
+                    if (termType != prevTermType && IsNumericType(termType) && IsNumericType(prevTermType))
+                    {
+                        Console.WriteLine($"Chyba: Nesm√≠chejte typy v aritmetick√©m v√Ωrazu: '{prevTermType}' a '{termType}'.");
+                    }
+                }
+            }
+        }
+        
+        return null;
+    }
+
+    public override object VisitTerm(AlgolSubsetParser.TermContext context)
+    {
+        // Nav≈°t√≠vit v≈°echny faktory
+        foreach (var factor in context.factor())
+        {
+            Visit(factor);
+        }
+        
+        // Kontrola typ≈Ø pro n√°soben√≠/dƒõlen√≠ (*, /)
+        if (context.factor().Length > 1)
+        {
+            for (int i = 0; i < context.factor().Length; i++)
+            {
+                string factorType = GetFactorType(context.factor(i));
+                
+                if (!IsNumericType(factorType))
+                {
+                    Console.WriteLine($"Chyba: Aritmetick√© operace (*,/) nen√≠ povolena pro typ '{factorType}'. Povoleny jsou pouze typy 'int' a 'real'.");
+                }
+                
+                // Kontrola kompatibility typ≈Ø mezi operandy
+                if (i > 0)
+                {
+                    string prevFactorType = GetFactorType(context.factor(i-1));
+                    if (factorType != prevFactorType && IsNumericType(factorType) && IsNumericType(prevFactorType))
+                    {
+                        Console.WriteLine($"Chyba: Nesm√≠chejte typy v aritmetick√©m v√Ωrazu: '{prevFactorType}' a '{factorType}'.");
+                    }
+                }
+            }
+        }
+        
+        return null;
+    }
+
+    public override object VisitExpression(AlgolSubsetParser.ExpressionContext context)
+    {
+        // Nav≈°t√≠vit v≈°echny simple_expr
+        foreach (var simpleExpr in context.simple_expr())
+        {
+            Visit(simpleExpr);
+        }
+        
+        // Kontrola typ≈Ø pro relaƒçn√≠ operace (=, !=, <, <=, >, >=)
+        if (context.simple_expr().Length > 1)
+        {
+            string leftType = GetSimpleExprType(context.simple_expr(0));
+            string rightType = GetSimpleExprType(context.simple_expr(1));
+            
+            if (leftType != rightType)
+            {
+                Console.WriteLine($"Chyba: Nelze porovn√°vat r≈Øzn√© typy: '{leftType}' a '{rightType}'.");
+            }
+        }
+        
+        return null;
     }
 }
