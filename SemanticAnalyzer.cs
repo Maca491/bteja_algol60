@@ -11,9 +11,9 @@ public class SemanticAnalyzer : AlgolSubsetBaseVisitor<object>
     {
         public string Type { get; set; }
         public SymbolKind Kind { get; set; }
-        public string ReturnType { get; set; } // Pro funkce
+        public string ReturnType { get; set; } 
         public bool IsArray { get; set; }
-        public bool IsFunctionType { get; set; } // NOVÉ: Je to funkèní typ?
+        public bool IsFunctionType { get; set; }
     }
 
     public enum SymbolKind
@@ -28,8 +28,7 @@ public class SemanticAnalyzer : AlgolSubsetBaseVisitor<object>
         // Globální rozsah
         scopes.Push(new Dictionary<string, SymbolInfo>());
 
-        // Registrovat vestavìné symboly (napø. print), aby se nehlásily jako nedeclarované
-        // (atributy lze rozšíøit pozdìji, pokud budete kontrolovat signatury)
+        // Registruje print, aby poøád neskákalo varování, že není deklarována
         DeclareSymbol("print", new SymbolInfo
         {
             Type = "void",
@@ -151,9 +150,9 @@ public class SemanticAnalyzer : AlgolSubsetBaseVisitor<object>
         string name = context.IDENT().GetText();
         string type = context.type().GetText();
         bool isArray = context.type().array_type() != null;
-        bool isFunctionType = context.type().function_type() != null; // NOVÉ: Kontrola funkèního typu
+        bool isFunctionType = context.type().function_type() != null; //kontrola funkèního typu
 
-        // NOVÉ: Rozlišení funkèního parametru
+        // Rozlišení funkèního parametru
         var kind = isFunctionType ? SymbolKind.Function : SymbolKind.Variable;
 
         DeclareSymbol(name, new SymbolInfo
@@ -242,8 +241,6 @@ public class SemanticAnalyzer : AlgolSubsetBaseVisitor<object>
 
     public override object VisitFactor(AlgolSubsetParser.FactorContext context)
     {
-        // Po zmìnì gramatiky máme samostatné tokeny INT_LITERAL a REAL_LITERAL.
-        // Nevyvolávají chybu nedeclarovaného identifikátoru, proto je ignorujeme zde.
         if (context.INT_LITERAL() != null || context.REAL_LITERAL() != null || context.STRING() != null)
         {
             return null; // literály jsou v poøádku

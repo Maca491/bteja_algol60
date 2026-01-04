@@ -1,7 +1,7 @@
 begin
   var result : int;
   
-  // Funkce jako parametr - UPRAVENO: pridana uplna signatura
+  // Funkce jako parametr
   function apply(f : function(int) : int, x : int) : int;
   begin
     return f(x);

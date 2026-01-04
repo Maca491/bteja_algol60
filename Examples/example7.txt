@@ -34,8 +34,8 @@ begin
     // Volání vnoøené funkce
     temp := temp + innerShadow(20);
     
-    // Po návratu z innerShadow, x je stále parametr shadowTest
-    // y je stále lokální y ze shadowTest (hodnota 50)
+    // Po návratu z innerShadow, x je zase parametr shadowTest
+    // y je stále lokální y z shadowTest (hodnota 50)
     temp := temp + y + z;
     
     print(temp);

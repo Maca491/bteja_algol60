@@ -22,7 +22,7 @@ namespace Compiler
         private readonly Dictionary<string, (LLVMValueRef func, LLVMTypeRef returnType)> _functions = new Dictionary<string, (LLVMValueRef, LLVMTypeRef)>();
 
         // Stack pro vnořené scope (pro lokální proměnné ve funkcích)
-        // Každý scope udržuje záznamy o nově deklarovaných jménech a (pokud byly předtím přepsány) jejich předchozích hodnotách.
+        // Udržuje záznamy o nově deklarovaných jménech a (pokud byly předtím přepsány) jejich předchozích hodnotách.
         private readonly Stack<Dictionary<string, ScopeEntry>> _scopeStack = new Stack<Dictionary<string, ScopeEntry>>();
 
         private LLVMValueRef _printfFunc;
@@ -102,7 +102,7 @@ namespace Compiler
         {
             if (typeName.StartsWith("array"))
             {
-                // Parsování: "array[1..3,1..3]ofint"
+                // Parsování: "array[1..3,1..3] of int"
                 var ofIndex = typeName.IndexOf("of");
                 var elementTypeName = typeName.Substring(ofIndex + 2).Trim();
                 var elementType = GetLLVMType(elementTypeName);
@@ -150,7 +150,6 @@ namespace Compiler
                 var retType = GetLLVMType(retName);
 
                 var funcType = LLVMTypeRef.CreateFunction(retType, paramTypes.ToArray(), false);
-                // Zde použijeme statickou metodu CreatePointer
                 return LLVMTypeRef.CreatePointer(funcType, 0);
             }
 
@@ -169,12 +168,12 @@ namespace Compiler
             var entryBlock = _context.AppendBasicBlock(mainFunc, "entry");
 
             _currentFunction = mainFunc;
-            _currentReturnType = _i32Type; // nastavit očekávaný návratový typ pro top-level (main)
+            _currentReturnType = _i32Type; // nastavit očekávaný návratový typ pro top-level (main (int))
             _builder.PositionAtEnd(entryBlock);
 
             base.VisitProgram(context);
 
-            // Pokud je aktuální blok bez terminátoru, přidáme návrat (kontrolujeme vložený blok, ne jen entry)
+            // Pokud je aktuální blok bez terminátoru, přidáme návrat
             var insertBlock = _builder.InsertBlock;
             if (insertBlock.Handle != IntPtr.Zero && insertBlock.Terminator.Handle == IntPtr.Zero)
             {
@@ -184,7 +183,6 @@ namespace Compiler
             return mainFunc;
         }
 
-        // Upravit VisitFunction_decl: uložit/obnovit _currentReturnType
 public override LLVMValueRef VisitFunction_decl(AlgolSubsetParser.Function_declContext context)
 {
     string funcName = context.IDENT().GetText();
@@ -297,39 +295,17 @@ public override LLVMValueRef VisitFunction_decl(AlgolSubsetParser.Function_declC
             return default;
         }
 
-        // Přidáno: efektivní kopírování polí pomocí llvm.memcpy a podpora vícerozměrných polí (kopírování celé paměti)
-private (List<ulong> dims, LLVMTypeRef elementType) GetArrayDimensionsAndElementType(LLVMTypeRef arrayType)
-{
-    var dims = new List<ulong>();
-    var current = arrayType;
-    while (current.Kind == LLVMTypeKind.LLVMArrayTypeKind)
+    private (List<ulong> dims, LLVMTypeRef elementType) GetArrayDimensionsAndElementType(LLVMTypeRef arrayType)
     {
-        dims.Add(current.ArrayLength);
-        current = current.ElementType;
+        var dims = new List<ulong>();
+        var current = arrayType;
+        while (current.Kind == LLVMTypeKind.LLVMArrayTypeKind)
+        {
+            dims.Add(current.ArrayLength);
+            current = current.ElementType;
+        }
+        return (dims, current);
     }
-    return (dims, current);
-}
-
-private ulong GetElementSizeInBytes(LLVMTypeRef t)
-{
-    // Jednoduchý odhad velikosti primitivních typů pro cílovou platformu x86_64.
-    // Pokud potřebujete přesné hodnoty z DataLayout, rozšíříme později.
-    switch (t.Kind)
-    {
-        case LLVMTypeKind.LLVMIntegerTypeKind:
-            // IntWidth je v bitech (např. 32)
-            return (ulong)(t.IntWidth / 8);
-        case LLVMTypeKind.LLVMDoubleTypeKind:
-            return 8UL;
-        case LLVMTypeKind.LLVMFloatTypeKind:
-            return 4UL;
-        case LLVMTypeKind.LLVMPointerTypeKind:
-            return (ulong)IntPtr.Size;
-        default:
-            // Bezpečný fallback na pointer-size
-            return (ulong)IntPtr.Size;
-    }
-}
 
 // Nahrazena EmitArrayMemCpy: stabilní element-wise copy (flattened) místo problémového llvm.memcpy
 private void EmitArrayMemCpy(LLVMValueRef dstAllocaPtr, LLVMTypeRef dstType, LLVMValueRef srcAllocaPtr, LLVMTypeRef srcType)
@@ -348,7 +324,7 @@ private void EmitArrayMemCpy(LLVMValueRef dstAllocaPtr, LLVMTypeRef dstType, LLV
     var (dstDims, dstElem) = GetArrayDimensionsAndElementType(dstArrayType);
     var (srcDims, srcElem) = GetArrayDimensionsAndElementType(srcArrayType);
 
-    // Kompatibilita: stejné dimenze a element typ
+    // Kontrola - stejné dimenze a typ
     if (dstDims.Count != srcDims.Count)
     {
         Console.Error.WriteLine("Chyba: Přiřazení polí - rozdílný počet rozměrů.");
@@ -406,12 +382,10 @@ private void EmitArrayMemCpy(LLVMValueRef dstAllocaPtr, LLVMTypeRef dstType, LLV
     var loaded = _builder.BuildLoad2(dstElem, srcElemPtr, "src_elem");
     _builder.BuildStore(loaded, dstElemPtr);
 
-    // idx++
     var next = _builder.BuildAdd(idx, LLVMValueRef.CreateConstInt(_i32Type, 1UL, false), "idx_next");
     _builder.BuildStore(next, idxAlloca);
     _builder.BuildBr(condBlock);
 
-    // After
     _builder.PositionAtEnd(afterBlock);
 }
 
@@ -450,7 +424,7 @@ public override LLVMValueRef VisitAssignment(AlgolSubsetParser.AssignmentContext
         // Získání typu prvku pole
         var elementType = GetArrayElementType(targetType);
 
-        // Přísné porovnání typů - žádná automatická konverze
+        // Přísné porovnání typů 
         if (!TypesEqual(assignedValue.TypeOf, elementType))
         {
             Console.Error.WriteLine($"Chyba typů: nelze přiřadit hodnotu typu '{assignedValue.TypeOf.Kind}' do prvku pole typu '{elementType.Kind}'.");
@@ -470,7 +444,6 @@ public override LLVMValueRef VisitAssignment(AlgolSubsetParser.AssignmentContext
 
     if (targetIsArray)
     {
-        // Povolené RHS pouze simple IDENT (jméno pole) pro jednoduchost
         string rhsText = rhsExpr.GetText();
 
         if (_namedValues.TryGetValue(rhsText, out var srcInfo))
@@ -486,7 +459,6 @@ public override LLVMValueRef VisitAssignment(AlgolSubsetParser.AssignmentContext
         return default;
     }
 
-    // Skalární proměnné (původní chování)
     LLVMValueRef value = Visit(context.expression(exprIndex));
 
     if (value.Handle == IntPtr.Zero)
@@ -497,7 +469,6 @@ public override LLVMValueRef VisitAssignment(AlgolSubsetParser.AssignmentContext
 
     var valueType = value.TypeOf;
 
-    // Přísné porovnání typů - žádná automatická konverze
     if (!TypesEqual(valueType, targetType))
     {
         Console.Error.WriteLine($"Chyba typů: nelze přiřadit hodnotu typu '{valueType.Kind}' do proměnné '{name}' typu '{targetType.Kind}'.");
@@ -523,11 +494,9 @@ public override LLVMValueRef VisitAssignment(AlgolSubsetParser.AssignmentContext
             var elseBlock = context.statement().Length > 1 ? _context.AppendBasicBlock(_currentFunction, "else") : default;
             var mergeBlock = _context.AppendBasicBlock(_currentFunction, "ifcont");
 
-            // Podmíněný skok
             var condType = condition.TypeOf;
             if (condType.Kind == LLVMTypeKind.LLVMDoubleTypeKind)
             {
-                // Konverze double na bool (i1)
                 var zero = LLVMValueRef.CreateConstReal(_doubleType, 0.0);
                 condition = _builder.BuildFCmp(LLVMRealPredicate.LLVMRealONE, condition, zero, "ifcond");
             }
@@ -593,7 +562,6 @@ public override LLVMValueRef VisitAssignment(AlgolSubsetParser.AssignmentContext
             }
             _builder.BuildStore(startVal, varPtr);
 
-            // Krok (pokud existuje) - default podle typu smyčové proměnné
             LLVMValueRef stepVal;
             if (context.expression().Length > 1 && context.GetChild(5).GetText() == "step")
             {
@@ -647,7 +615,6 @@ public override LLVMValueRef VisitAssignment(AlgolSubsetParser.AssignmentContext
             return default;
         }
 
-        // Upravit VisitReturn_statement - bez automatické konverze, porovnat s _currentReturnType
 public override LLVMValueRef VisitReturn_statement(AlgolSubsetParser.Return_statementContext context)
 {
     var returnValue = Visit(context.expression());
@@ -674,7 +641,6 @@ public override LLVMValueRef VisitReturn_statement(AlgolSubsetParser.Return_stat
     return returnValue;
 }
 
-        // Upravit VisitSimple_expr - zakázat implicitní int->double/vice konverze
 public override LLVMValueRef VisitSimple_expr(AlgolSubsetParser.Simple_exprContext context)
 {
     LLVMValueRef left = Visit(context.term(0));
@@ -697,7 +663,6 @@ public override LLVMValueRef VisitSimple_expr(AlgolSubsetParser.Simple_exprConte
 
         string op = context.GetChild(2 * i - 1).GetText();
 
-        // Přísné porovnání typů - bez automatické konverze
         if (!TypesEqual(left.TypeOf, right.TypeOf))
         {
             Console.Error.WriteLine($"Chyba typů v aritmetickém výrazu: levý operand '{left.TypeOf.Kind}', pravý operand '{right.TypeOf.Kind}'.");
@@ -774,7 +739,6 @@ public override LLVMValueRef VisitSimple_expr(AlgolSubsetParser.Simple_exprConte
             return left;
         }
 
-        // Upravit VisitTerm analogicky k VisitSimple_expr (bez implicitních konverzí)
 public override LLVMValueRef VisitTerm(AlgolSubsetParser.TermContext context)
 {
     LLVMValueRef left = Visit(context.factor(0));
@@ -940,11 +904,10 @@ public override LLVMValueRef VisitTerm(AlgolSubsetParser.TermContext context)
     {
         foreach (var scope in _scopeStack)
         {
-            if (scope.TryGetValue(name, out var scopedEntry)) // scopedEntry je ScopeEntry
+            if (scope.TryGetValue(name, out var scopedEntry)) 
             {
-                // Převést ScopeEntry na tuple očekávaný _namedValues a varInfo
                 varInfo = (scopedEntry.Ptr, scopedEntry.Type);
-                _namedValues[name] = varInfo; // uložíme tuple, ne ScopeEntry
+                _namedValues[name] = varInfo; 
                 foundVar = true;
                 break;
             }
@@ -955,7 +918,6 @@ public override LLVMValueRef VisitTerm(AlgolSubsetParser.TermContext context)
     {
         var (ptr, varType) = varInfo;
 
-        // Pokud pointer invalidní, považujeme to za chybu
         if (ptr.Handle == IntPtr.Zero)
         {
             Console.Error.WriteLine($"Chyba: Interní: proměnná '{name}' existuje, ale pointer je neplatný.");
@@ -1080,7 +1042,6 @@ public override LLVMValueRef VisitTerm(AlgolSubsetParser.TermContext context)
     return default;
 }
 
-        // Pomocné metody - vložte do třídy
         private LLVMTypeRef GetArrayElementType(LLVMTypeRef arrayType)
         {
             var current = arrayType;
@@ -1108,11 +1069,8 @@ public override LLVMValueRef VisitTerm(AlgolSubsetParser.TermContext context)
         // Rychlá kontrola podle Kind
         if (a.Kind != b.Kind) return false;
 
-        // Speciální porovnání pro funkční typy — porovnáme textovou reprezentaci typu
         if (a.Kind == LLVMTypeKind.LLVMFunctionTypeKind)
         {
-            // LLVMTypeRef nemá FunctionType vlastnost v této binding verzi,
-            // proto porovnáme canonical string reprezentaci typu.
             return a.ToString() == b.ToString();
         }
 
@@ -1122,7 +1080,6 @@ public override LLVMValueRef VisitTerm(AlgolSubsetParser.TermContext context)
             return a.ElementType.Kind == b.ElementType.Kind;
         }
 
-        // Pro ostatní typy stačí shoda Kind
         return true;
     }
         }
