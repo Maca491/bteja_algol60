@@ -61,6 +61,7 @@ namespace Compilator
                         module.PrintToFile(outputFile);
                         Console.WriteLine($"Soubor '{outputFile}' byl úspěšně vygenerován.");
                         System.Diagnostics.Process.Start("clang", "output.ll -o program.exe");
+
                     }
                 }
             } while((command = Console.ReadLine()) != "end");
