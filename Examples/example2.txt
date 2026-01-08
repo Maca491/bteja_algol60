@@ -10,7 +10,7 @@ begin
   function square(n : int) : int;
   begin
     return n * n;
-  end
+  end§
 
   result := apply(square, 5);
   

@@ -14,7 +14,6 @@ public class SemanticAnalyzer : AlgolSubsetBaseVisitor<object>
         public string ReturnType { get; set; } 
         public bool IsArray { get; set; }
         public bool IsFunctionType { get; set; }
-        public bool IsFunctionType { get; set; } 
     }
 
     public enum SymbolKind
